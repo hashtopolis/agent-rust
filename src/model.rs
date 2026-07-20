@@ -1,7 +1,4 @@
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(into = "u8", try_from = "u8")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
     Linux,
     Windows,
@@ -9,14 +6,6 @@ pub enum Os {
 }
 
 impl Os {
-    pub const fn code(self) -> u8 {
-        match self {
-            Os::Linux => 0,
-            Os::Windows => 1,
-            Os::Darwin => 2,
-        }
-    }
-
     pub const fn binary_extension(self) -> &'static str {
         match self {
             Os::Windows => ".exe",
@@ -37,50 +26,19 @@ impl Os {
     }
 }
 
-impl From<Os> for u8 {
-    fn from(os: Os) -> u8 {
-        os.code()
-    }
-}
-
-impl TryFrom<u8> for Os {
-    type Error = String;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Os::Linux),
-            1 => Ok(Os::Windows),
-            2 => Ok(Os::Darwin),
-            other => Err(format!("unknown OS code: {other}")),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchmarkType {
     Speed,
     Run,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskId {
-    None,
-    HealthCheck,
-    Id(u64),
-}
-
-impl TaskId {
-    pub const HEALTH_CHECK: i64 = -1;
-
-    pub fn from_raw(raw: Option<i64>) -> Self {
-        match raw {
-            None => TaskId::None,
-            Some(Self::HEALTH_CHECK) => TaskId::HealthCheck,
-            Some(id) if id >= 0 => TaskId::Id(id as u64),
-            Some(_) => TaskId::None,
-        }
-    }
+pub enum BinaryType {
+    Extractor,
+    Cracker,
+    Prince,
+    Uftpd,
+    Preprocessor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,4 +46,166 @@ pub struct Chunk {
     pub id: u64,
     pub skip: u64,
     pub length: u64,
+}
+
+/// Success/error status shared by every server response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseStatus {
+    Success,
+    Error,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponseEnvelope {
+    pub action: Option<String>,
+    pub response: ResponseStatus,
+    pub message: Option<String>,
+}
+
+impl ResponseEnvelope {
+    pub fn is_success(&self) -> bool {
+        self.response == ResponseStatus::Success
+    }
+}
+
+/// Reply for every action whose only payload is the SUCCESS/ERROR status itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AckResponse {
+    pub envelope: ResponseEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterResponse {
+    pub token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginResponse {
+    pub timeout: i64,
+    pub multicast_enabled: bool,
+    pub server_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckClientVersionResponse {
+    UpToDate,
+    NewVersion { url: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadBinaryResponse {
+    // NB: on the wire this URL arrives in the `executable` field (not `url`);
+    // we expose it as `url` here to mirror the other variants
+    Utility {
+        url: String,
+    },
+    Archive {
+        url: String,
+        name: String,
+        binary: String,
+    },
+    Preprocessor {
+        url: String,
+        name: String,
+        binary: String,
+        keyspace_command: String,
+        skip_command: String,
+        limit_command: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrainConfig {
+    pub host: String,
+    pub port: i64,
+    pub pass: String,
+    pub features: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preprocessor {
+    pub id: u64,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskAssignment {
+    pub task_id: u64,
+    pub cracker_id: u64,
+    pub attack_command: String,
+    pub cmd_parameters: String,
+    pub hashlist_id: u64,
+    pub benchmark: i64,
+    pub status_timer: i64,
+    pub files: Vec<String>,
+    pub bench_type: BenchmarkType,
+    pub hashlist_alias: String,
+    pub keyspace: u64,
+    pub enforce_pipe: bool,
+    pub slow_hash: bool,
+    pub preprocessor: Option<Preprocessor>,
+    pub brain: Option<BrainConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetTaskResponse {
+    HealthCheck,
+    NoTask { reason: Option<String> },
+    Task(Box<TaskAssignment>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetChunkResponse {
+    Chunk(Chunk),
+    KeyspaceRequired,
+    BenchmarkRequired,
+    FullyDispatched,
+    CrackerUpdate,
+    HealthCheck,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendProgressResponse {
+    Continue {
+        cracked: u64,
+        skipped: u64,
+        zaps: Vec<String>,
+    },
+    Stop {
+        cracked: u64,
+        skipped: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetFileResponse {
+    pub filename: String,
+    pub extension: String,
+    pub url: String,
+    pub filesize: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetFileStatusResponse {
+    pub filenames: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetHashlistResponse {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetFoundResponse {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetHealthCheckResponse {
+    pub attack: String,
+    pub cracker_binary_id: u64,
+    pub hashes: Vec<String>,
+    pub check_id: u64,
+    pub hashlist_alias: String,
 }

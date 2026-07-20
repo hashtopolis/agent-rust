@@ -3,13 +3,13 @@ use std::fmt;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::model::{BenchmarkType, Os};
-use crate::protocol::{
-    AckResponse, BinaryType, CheckClientVersionResponse, DownloadBinaryResponse, GetChunkResponse,
-    GetFileResponse, GetFileStatusResponse, GetFoundResponse, GetHashlistResponse,
-    GetHealthCheckResponse, GetTaskResponse, LoginResponse, ProtocolError, RegisterResponse,
-    Request, SendProgressResponse, raw,
+use crate::model::{
+    AckResponse, BenchmarkType, BinaryType, CheckClientVersionResponse, DownloadBinaryResponse,
+    GetChunkResponse, GetFileResponse, GetFileStatusResponse, GetFoundResponse, GetHashlistResponse,
+    GetHealthCheckResponse, GetTaskResponse, LoginResponse, Os, RegisterResponse,
+    SendProgressResponse,
 };
+use crate::protocol::{ProtocolError, Request, raw};
 use crate::transport::{Transport, TransportError};
 
 #[derive(Debug)]
@@ -128,8 +128,17 @@ impl<T: Transport> Client<T> {
         Ok(serde_json::from_value(value)?)
     }
 
+    async fn call_ack(
+        &self,
+        action: &'static str,
+        request: Request,
+    ) -> Result<AckResponse, ClientError> {
+        let raw: raw::AckResponse = self.call(action, request).await?;
+        Ok(raw.into())
+    }
+
     pub async fn test_connection(&self) -> Result<AckResponse, ClientError> {
-        self.call("testConnection", Request::TestConnection).await
+        self.call_ack("testConnection", Request::TestConnection).await
     }
 
     pub async fn register(
@@ -173,12 +182,12 @@ impl<T: Transport> Client<T> {
         os: Os,
         devices: Vec<String>,
     ) -> Result<AckResponse, ClientError> {
-        self.call(
+        self.call_ack(
             "updateInformation",
             Request::UpdateInformation {
                 token: self.token_owned(),
                 uid: uid.into(),
-                os,
+                os: os.into(),
                 devices,
             },
         )
@@ -214,7 +223,7 @@ impl<T: Transport> Client<T> {
                 "downloadBinary",
                 Request::DownloadBinary {
                     token: self.token_owned(),
-                    binary_type,
+                    binary_type: binary_type.into(),
                     binary_version_id,
                     preprocessor_id,
                 },
@@ -253,7 +262,7 @@ impl<T: Transport> Client<T> {
         task_id: u64,
         keyspace: u64,
     ) -> Result<AckResponse, ClientError> {
-        self.call(
+        self.call_ack(
             "sendKeyspace",
             Request::SendKeyspace {
                 token: self.token_owned(),
@@ -270,12 +279,12 @@ impl<T: Transport> Client<T> {
         bench_type: BenchmarkType,
         result: impl Into<String>,
     ) -> Result<AckResponse, ClientError> {
-        self.call(
+        self.call_ack(
             "sendBenchmark",
             Request::SendBenchmark {
                 token: self.token_owned(),
                 task_id,
-                bench_type,
+                bench_type: bench_type.into(),
                 result: result.into(),
             },
         )
@@ -313,7 +322,7 @@ impl<T: Transport> Client<T> {
         chunk_id: Option<u64>,
         message: impl Into<String>,
     ) -> Result<AckResponse, ClientError> {
-        self.call(
+        self.call_ack(
             "clientError",
             Request::ClientError {
                 token: self.token_owned(),
@@ -402,7 +411,7 @@ impl<T: Transport> Client<T> {
         num_gpus: u32,
         errors: Vec<String>,
     ) -> Result<AckResponse, ClientError> {
-        self.call(
+        self.call_ack(
             "sendHealthCheck",
             Request::SendHealthCheck {
                 token: self.token_owned(),
@@ -418,7 +427,7 @@ impl<T: Transport> Client<T> {
     }
 
     pub async fn deregister(&self) -> Result<AckResponse, ClientError> {
-        self.call(
+        self.call_ack(
             "deregister",
             Request::Deregister {
                 token: self.token_owned(),

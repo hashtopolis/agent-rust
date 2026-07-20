@@ -1,13 +1,13 @@
 mod support;
 
 use htp_agent::client::{Client, ClientError, ProgressReport};
-use htp_agent::model::{BenchmarkType, Os};
-use htp_agent::protocol::{
-    BinaryType, BrainConfig, CheckClientVersionResponse, DownloadBinaryResponse, GetChunkResponse,
-    GetFileResponse, GetFileStatusResponse, GetFoundResponse, GetHashlistResponse,
-    GetHealthCheckResponse, GetTaskResponse, LoginResponse, Preprocessor, ProtocolError,
-    RegisterResponse, SendProgressResponse, TaskAssignment,
+use htp_agent::model::{
+    BenchmarkType, BinaryType, BrainConfig, CheckClientVersionResponse, Chunk,
+    DownloadBinaryResponse, GetChunkResponse, GetFileResponse, GetFileStatusResponse,
+    GetFoundResponse, GetHashlistResponse, GetHealthCheckResponse, GetTaskResponse, LoginResponse,
+    Os, Preprocessor, RegisterResponse, SendProgressResponse, TaskAssignment,
 };
+use htp_agent::protocol::ProtocolError;
 use htp_agent::transport::TransportError;
 use serde_json::{Value, json};
 
@@ -414,11 +414,11 @@ async fn get_chunk_returns_chunk() {
 
     assert_eq!(
         res,
-        GetChunkResponse::Chunk {
+        GetChunkResponse::Chunk(Chunk {
             id: 10,
             skip: 0,
             length: 100
-        }
+        })
     );
     assert_client_sent_body(
         &client,

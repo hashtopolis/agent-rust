@@ -1,43 +1,114 @@
 use serde::{Deserialize, Serialize};
 
-use crate::model::{BenchmarkType, Os, TaskId};
+use crate::model::{
+    self, BrainConfig, Chunk, Preprocessor, ResponseEnvelope, ResponseStatus, TaskAssignment,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ResponseStatus {
-    #[serde(rename = "SUCCESS")]
-    Success,
-    #[serde(rename = "ERROR")]
-    Error,
-    #[serde(other)]
-    Other,
+/// Classifies `taskId` field in a `getTask` reply:
+/// - absent means no task,
+/// - `-1` means a health check
+/// - any non-negative value is a real id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskId {
+    None,
+    HealthCheck,
+    Id(u64), // TODO: maybe use NonZeroU64?
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ResponseEnvelope {
-    #[serde(default)]
-    pub action: Option<String>,
-    pub response: ResponseStatus,
-    #[serde(default)]
-    pub message: Option<String>,
-}
+impl TaskId {
+    const HEALTH_CHECK: i64 = -1;
 
-impl ResponseEnvelope {
-    pub fn is_success(&self) -> bool {
-        self.response == ResponseStatus::Success
+    pub(crate) fn from_raw(raw: Option<i64>) -> Self {
+        match raw {
+            None => TaskId::None,
+            Some(Self::HEALTH_CHECK) => TaskId::HealthCheck,
+            Some(id) if id >= 0 => TaskId::Id(id as u64),
+            Some(_) => TaskId::None,
+        }
     }
 }
 
-// Shared by every action whose only payload is the SUCCESS/ERROR status itself.
-// sendKeyspace and sendBenchmark also fold in here: their one field is a constant
-// "OK" that merely restates SUCCESS, so it carries no information worth a distinct type.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AckResponse {
-    #[serde(flatten)]
-    pub envelope: ResponseEnvelope,
+/// Wire mirror of [`model::Os`]: serialized as the numeric code the server expects.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(into = "u8")]
+pub(crate) enum Os {
+    Linux = 0,
+    Windows = 1,
+    Darwin = 2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ChunkStatus {
+impl From<model::Os> for Os {
+    fn from(os: model::Os) -> Self {
+        match os {
+            model::Os::Linux => Os::Linux,
+            model::Os::Windows => Os::Windows,
+            model::Os::Darwin => Os::Darwin,
+        }
+    }
+}
+
+impl From<Os> for u8 {
+    fn from(os: Os) -> u8 {
+        os as u8
+    }
+}
+
+/// Wire mirror of [`model::BenchmarkType`]: serialized as its lowercase name.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) enum BenchmarkType {
+    #[serde(rename = "speed")]
+    Speed,
+    #[serde(rename = "run")]
+    Run,
+}
+
+impl From<model::BenchmarkType> for BenchmarkType {
+    fn from(bench: model::BenchmarkType) -> Self {
+        match bench {
+            model::BenchmarkType::Speed => BenchmarkType::Speed,
+            model::BenchmarkType::Run => BenchmarkType::Run,
+        }
+    }
+}
+
+impl From<BenchmarkType> for model::BenchmarkType {
+    fn from(bench: BenchmarkType) -> Self {
+        match bench {
+            BenchmarkType::Speed => model::BenchmarkType::Speed,
+            BenchmarkType::Run => model::BenchmarkType::Run,
+        }
+    }
+}
+
+/// Wire mirror of [`model::BinaryType`]: serialized as the server's binary tag.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) enum BinaryType {
+    #[serde(rename = "7zr")]
+    Extractor,
+    #[serde(rename = "cracker")]
+    Cracker,
+    #[serde(rename = "prince")]
+    Prince,
+    #[serde(rename = "uftpd")]
+    Uftpd,
+    #[serde(rename = "preprocessor")]
+    Preprocessor,
+}
+
+impl From<model::BinaryType> for BinaryType {
+    fn from(binary: model::BinaryType) -> Self {
+        match binary {
+            model::BinaryType::Extractor => BinaryType::Extractor,
+            model::BinaryType::Cracker => BinaryType::Cracker,
+            model::BinaryType::Prince => BinaryType::Prince,
+            model::BinaryType::Uftpd => BinaryType::Uftpd,
+            model::BinaryType::Preprocessor => BinaryType::Preprocessor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub(crate) enum ChunkStatus {
     #[serde(rename = "keyspace_required")]
     KeyspaceRequired,
     #[serde(rename = "benchmark")]
@@ -52,31 +123,17 @@ pub enum ChunkStatus {
     Ok,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UpdateVersion {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub(crate) enum UpdateVersion {
     #[serde(rename = "OK")]
     UpToDate,
     #[serde(rename = "NEW")]
     NewVersion,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BinaryType {
-    #[serde(rename = "7zr")]
-    Extractor,
-    #[serde(rename = "cracker")]
-    Cracker,
-    #[serde(rename = "prince")]
-    Prince,
-    #[serde(rename = "uftpd")]
-    Uftpd,
-    #[serde(rename = "preprocessor")]
-    Preprocessor,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "action")]
-pub enum Request {
+pub(crate) enum Request {
     #[serde(rename = "register")]
     Register {
         voucher: String,
@@ -256,14 +313,38 @@ impl<T> Require<T> for Option<T> {
     }
 }
 
-pub mod raw {
+pub(crate) mod raw {
     use serde::Deserialize;
 
-    use super::{ChunkStatus, UpdateVersion};
-    use crate::model::BenchmarkType;
+    use super::{BenchmarkType, ChunkStatus, UpdateVersion};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+    pub(crate) enum Status {
+        #[serde(rename = "SUCCESS")]
+        Success,
+        #[serde(rename = "ERROR")]
+        Error,
+        #[serde(other)]
+        Other,
+    }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct GetTaskResponse {
+    pub(crate) struct Envelope {
+        #[serde(default)]
+        pub action: Option<String>,
+        pub response: Status,
+        #[serde(default)]
+        pub message: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub(crate) struct AckResponse {
+        #[serde(flatten)]
+        pub envelope: Envelope,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub(crate) struct GetTaskResponse {
         #[serde(rename = "taskId", default)]
         pub task_id: Option<i64>,
         #[serde(default)]
@@ -311,7 +392,7 @@ pub mod raw {
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct GetChunkResponse {
+    pub(crate) struct GetChunkResponse {
         pub status: ChunkStatus,
         #[serde(rename = "chunkId", default)]
         pub chunk_id: Option<u64>,
@@ -322,7 +403,7 @@ pub mod raw {
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct DownloadBinaryResponse {
+    pub(crate) struct DownloadBinaryResponse {
         #[serde(default)]
         pub executable: Option<String>,
         #[serde(default)]
@@ -338,7 +419,7 @@ pub mod raw {
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct CheckClientVersionResponse {
+    pub(crate) struct CheckClientVersionResponse {
         #[serde(default)]
         pub version: Option<UpdateVersion>,
         #[serde(default)]
@@ -346,7 +427,7 @@ pub mod raw {
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct GetFileResponse {
+    pub(crate) struct GetFileResponse {
         #[serde(default)]
         pub filename: Option<String>,
         #[serde(default)]
@@ -358,25 +439,25 @@ pub mod raw {
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct GetFileStatusResponse {
+    pub(crate) struct GetFileStatusResponse {
         #[serde(default)]
         pub filenames: Vec<String>,
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct GetHashlistResponse {
+    pub(crate) struct GetHashlistResponse {
         #[serde(default)]
         pub url: Option<String>,
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct GetFoundResponse {
+    pub(crate) struct GetFoundResponse {
         #[serde(default)]
         pub url: Option<String>,
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct GetHealthCheckResponse {
+    pub(crate) struct GetHealthCheckResponse {
         #[serde(default)]
         pub attack: Option<String>,
         #[serde(rename = "crackerBinaryId", default)]
@@ -390,13 +471,13 @@ pub mod raw {
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct RegisterResponse {
+    pub(crate) struct RegisterResponse {
         #[serde(default)]
         pub token: Option<String>,
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct LoginResponse {
+    pub(crate) struct LoginResponse {
         #[serde(default)]
         pub timeout: Option<i64>,
         #[serde(rename = "multicastEnabled", default)]
@@ -406,7 +487,7 @@ pub mod raw {
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub struct SendProgressResponse {
+    pub(crate) struct SendProgressResponse {
         #[serde(default)]
         pub cracked: u64,
         #[serde(default)]
@@ -418,33 +499,49 @@ pub mod raw {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegisterResponse {
-    pub token: String,
+impl From<raw::Status> for ResponseStatus {
+    fn from(status: raw::Status) -> Self {
+        match status {
+            raw::Status::Success => ResponseStatus::Success,
+            raw::Status::Error => ResponseStatus::Error,
+            raw::Status::Other => ResponseStatus::Other,
+        }
+    }
 }
 
-impl TryFrom<raw::RegisterResponse> for RegisterResponse {
+impl From<raw::Envelope> for ResponseEnvelope {
+    fn from(envelope: raw::Envelope) -> Self {
+        ResponseEnvelope {
+            action: envelope.action,
+            response: envelope.response.into(),
+            message: envelope.message,
+        }
+    }
+}
+
+impl From<raw::AckResponse> for model::AckResponse {
+    fn from(raw: raw::AckResponse) -> Self {
+        model::AckResponse {
+            envelope: raw.envelope.into(),
+        }
+    }
+}
+
+impl TryFrom<raw::RegisterResponse> for model::RegisterResponse {
     type Error = ProtocolError;
 
     fn try_from(raw: raw::RegisterResponse) -> Result<Self, Self::Error> {
-        Ok(RegisterResponse {
+        Ok(model::RegisterResponse {
             token: raw.token.require("token")?,
         })
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoginResponse {
-    pub timeout: i64,
-    pub multicast_enabled: bool,
-    pub server_version: String,
-}
-
-impl TryFrom<raw::LoginResponse> for LoginResponse {
+impl TryFrom<raw::LoginResponse> for model::LoginResponse {
     type Error = ProtocolError;
 
     fn try_from(raw: raw::LoginResponse) -> Result<Self, Self::Error> {
-        Ok(LoginResponse {
+        Ok(model::LoginResponse {
             timeout: raw.timeout.require("timeout")?,
             multicast_enabled: raw.multicast_enabled.require("multicastEnabled")?,
             server_version: raw.server_version.require("server-version")?,
@@ -452,48 +549,20 @@ impl TryFrom<raw::LoginResponse> for LoginResponse {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CheckClientVersionResponse {
-    UpToDate,
-    NewVersion { url: String },
-}
-
-impl TryFrom<raw::CheckClientVersionResponse> for CheckClientVersionResponse {
+impl TryFrom<raw::CheckClientVersionResponse> for model::CheckClientVersionResponse {
     type Error = ProtocolError;
 
     fn try_from(raw: raw::CheckClientVersionResponse) -> Result<Self, Self::Error> {
         match raw.version.require("version")? {
-            UpdateVersion::UpToDate => Ok(CheckClientVersionResponse::UpToDate),
-            UpdateVersion::NewVersion => Ok(CheckClientVersionResponse::NewVersion {
+            UpdateVersion::UpToDate => Ok(model::CheckClientVersionResponse::UpToDate),
+            UpdateVersion::NewVersion => Ok(model::CheckClientVersionResponse::NewVersion {
                 url: raw.url.require("url")?,
             }),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DownloadBinaryResponse {
-    // NB: on the wire this URL arrives in the `executable` field (not `url`);
-    // we expose it as `url` here to mirror the other variants
-    Utility {
-        url: String,
-    },
-    Archive {
-        url: String,
-        name: String,
-        binary: String,
-    },
-    Preprocessor {
-        url: String,
-        name: String,
-        binary: String,
-        keyspace_command: String,
-        skip_command: String,
-        limit_command: String,
-    },
-}
-
-impl TryFrom<raw::DownloadBinaryResponse> for DownloadBinaryResponse {
+impl TryFrom<raw::DownloadBinaryResponse> for model::DownloadBinaryResponse {
     type Error = ProtocolError;
 
     fn try_from(raw: raw::DownloadBinaryResponse) -> Result<Self, Self::Error> {
@@ -501,7 +570,7 @@ impl TryFrom<raw::DownloadBinaryResponse> for DownloadBinaryResponse {
             || raw.skip_command.is_some()
             || raw.limit_command.is_some()
         {
-            return Ok(DownloadBinaryResponse::Preprocessor {
+            return Ok(model::DownloadBinaryResponse::Preprocessor {
                 url: raw.url.require("url")?,
                 name: raw.name.require("name")?,
                 binary: raw.executable.require("executable")?,
@@ -512,66 +581,26 @@ impl TryFrom<raw::DownloadBinaryResponse> for DownloadBinaryResponse {
         }
 
         if let Some(url) = raw.url {
-            return Ok(DownloadBinaryResponse::Archive {
+            return Ok(model::DownloadBinaryResponse::Archive {
                 url,
                 name: raw.name.require("name")?,
                 binary: raw.executable.require("executable")?,
             });
         }
 
-        Ok(DownloadBinaryResponse::Utility {
+        Ok(model::DownloadBinaryResponse::Utility {
             url: raw.executable.require("executable")?,
         })
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BrainConfig {
-    pub host: String,
-    pub port: i64,
-    pub pass: String,
-    pub features: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Preprocessor {
-    pub id: u64,
-    pub command: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskAssignment {
-    pub task_id: u64,
-    pub cracker_id: u64,
-    pub attack_command: String,
-    pub cmd_parameters: String,
-    pub hashlist_id: u64,
-    pub benchmark: i64,
-    pub status_timer: i64,
-    pub files: Vec<String>,
-    pub bench_type: BenchmarkType,
-    pub hashlist_alias: String,
-    pub keyspace: u64,
-    pub enforce_pipe: bool,
-    pub slow_hash: bool,
-    pub preprocessor: Option<Preprocessor>,
-    pub brain: Option<BrainConfig>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GetTaskResponse {
-    HealthCheck,
-    NoTask { reason: Option<String> },
-    Task(Box<TaskAssignment>),
-}
-
-impl TryFrom<raw::GetTaskResponse> for GetTaskResponse {
+impl TryFrom<raw::GetTaskResponse> for model::GetTaskResponse {
     type Error = ProtocolError;
 
     fn try_from(raw: raw::GetTaskResponse) -> Result<Self, Self::Error> {
         let task_id = match TaskId::from_raw(raw.task_id) {
-            TaskId::HealthCheck => return Ok(GetTaskResponse::HealthCheck),
-            TaskId::None => return Ok(GetTaskResponse::NoTask { reason: raw.reason }),
+            TaskId::HealthCheck => return Ok(model::GetTaskResponse::HealthCheck),
+            TaskId::None => return Ok(model::GetTaskResponse::NoTask { reason: raw.reason }),
             TaskId::Id(id) => id,
         };
 
@@ -595,7 +624,7 @@ impl TryFrom<raw::GetTaskResponse> for GetTaskResponse {
             None
         };
 
-        Ok(GetTaskResponse::Task(Box::new(TaskAssignment {
+        Ok(model::GetTaskResponse::Task(Box::new(TaskAssignment {
             task_id,
             cracker_id: raw.cracker_id.require("crackerId")?,
             attack_command: raw.attack_command.require("attackcmd")?,
@@ -604,7 +633,10 @@ impl TryFrom<raw::GetTaskResponse> for GetTaskResponse {
             benchmark: raw.benchmark.require("bench")?,
             status_timer: raw.status_timer.require("statustimer")?,
             files: raw.files,
-            bench_type: raw.bench_type.require("benchType")?,
+            bench_type: raw
+                .bench_type
+                .map(model::BenchmarkType::from)
+                .require("benchType")?,
             hashlist_alias: raw.hashlist_alias.require("hashlistAlias")?,
             keyspace: raw.keyspace.require("keyspace")?,
             enforce_pipe: raw.enforce_pipe,
@@ -615,57 +647,34 @@ impl TryFrom<raw::GetTaskResponse> for GetTaskResponse {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GetChunkResponse {
-    Chunk { id: u64, skip: u64, length: u64 },
-    KeyspaceRequired,
-    BenchmarkRequired,
-    FullyDispatched,
-    CrackerUpdate,
-    HealthCheck,
-}
-
-impl TryFrom<raw::GetChunkResponse> for GetChunkResponse {
+impl TryFrom<raw::GetChunkResponse> for model::GetChunkResponse {
     type Error = ProtocolError;
 
     fn try_from(raw: raw::GetChunkResponse) -> Result<Self, Self::Error> {
         Ok(match raw.status {
-            ChunkStatus::Ok => GetChunkResponse::Chunk {
+            ChunkStatus::Ok => model::GetChunkResponse::Chunk(Chunk {
                 id: raw.chunk_id.require("chunkId")?,
                 skip: raw.skip.require("skip")?,
                 length: raw.length.require("length")?,
-            },
-            ChunkStatus::KeyspaceRequired => GetChunkResponse::KeyspaceRequired,
-            ChunkStatus::BenchmarkRequired => GetChunkResponse::BenchmarkRequired,
-            ChunkStatus::FullyDispatched => GetChunkResponse::FullyDispatched,
-            ChunkStatus::CrackerUpdate => GetChunkResponse::CrackerUpdate,
-            ChunkStatus::HealthCheck => GetChunkResponse::HealthCheck,
+            }),
+            ChunkStatus::KeyspaceRequired => model::GetChunkResponse::KeyspaceRequired,
+            ChunkStatus::BenchmarkRequired => model::GetChunkResponse::BenchmarkRequired,
+            ChunkStatus::FullyDispatched => model::GetChunkResponse::FullyDispatched,
+            ChunkStatus::CrackerUpdate => model::GetChunkResponse::CrackerUpdate,
+            ChunkStatus::HealthCheck => model::GetChunkResponse::HealthCheck,
         })
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SendProgressResponse {
-    Continue {
-        cracked: u64,
-        skipped: u64,
-        zaps: Vec<String>,
-    },
-    Stop {
-        cracked: u64,
-        skipped: u64,
-    },
-}
-
-impl From<raw::SendProgressResponse> for SendProgressResponse {
+impl From<raw::SendProgressResponse> for model::SendProgressResponse {
     fn from(raw: raw::SendProgressResponse) -> Self {
         if raw.agent.as_deref() == Some("stop") {
-            SendProgressResponse::Stop {
+            model::SendProgressResponse::Stop {
                 cracked: raw.cracked,
                 skipped: raw.skipped,
             }
         } else {
-            SendProgressResponse::Continue {
+            model::SendProgressResponse::Continue {
                 cracked: raw.cracked,
                 skipped: raw.skipped,
                 zaps: raw.zaps,
@@ -674,19 +683,11 @@ impl From<raw::SendProgressResponse> for SendProgressResponse {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GetFileResponse {
-    pub filename: String,
-    pub extension: String,
-    pub url: String,
-    pub filesize: u64,
-}
-
-impl TryFrom<raw::GetFileResponse> for GetFileResponse {
+impl TryFrom<raw::GetFileResponse> for model::GetFileResponse {
     type Error = ProtocolError;
 
     fn try_from(raw: raw::GetFileResponse) -> Result<Self, Self::Error> {
-        Ok(GetFileResponse {
+        Ok(model::GetFileResponse {
             filename: raw.filename.require("filename")?,
             extension: raw.extension.require("extension")?,
             url: raw.url.require("url")?,
@@ -695,68 +696,1086 @@ impl TryFrom<raw::GetFileResponse> for GetFileResponse {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GetFileStatusResponse {
-    pub filenames: Vec<String>,
-}
-
-impl From<raw::GetFileStatusResponse> for GetFileStatusResponse {
+impl From<raw::GetFileStatusResponse> for model::GetFileStatusResponse {
     fn from(raw: raw::GetFileStatusResponse) -> Self {
-        GetFileStatusResponse {
+        model::GetFileStatusResponse {
             filenames: raw.filenames,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GetHashlistResponse {
-    pub url: String,
-}
-
-impl TryFrom<raw::GetHashlistResponse> for GetHashlistResponse {
+impl TryFrom<raw::GetHashlistResponse> for model::GetHashlistResponse {
     type Error = ProtocolError;
 
     fn try_from(raw: raw::GetHashlistResponse) -> Result<Self, Self::Error> {
-        Ok(GetHashlistResponse {
+        Ok(model::GetHashlistResponse {
             url: raw.url.require("url")?,
         })
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GetFoundResponse {
-    pub url: String,
-}
-
-impl TryFrom<raw::GetFoundResponse> for GetFoundResponse {
+impl TryFrom<raw::GetFoundResponse> for model::GetFoundResponse {
     type Error = ProtocolError;
 
     fn try_from(raw: raw::GetFoundResponse) -> Result<Self, Self::Error> {
-        Ok(GetFoundResponse {
+        Ok(model::GetFoundResponse {
             url: raw.url.require("url")?,
         })
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GetHealthCheckResponse {
-    pub attack: String,
-    pub cracker_binary_id: u64,
-    pub hashes: Vec<String>,
-    pub check_id: u64,
-    pub hashlist_alias: String,
-}
-
-impl TryFrom<raw::GetHealthCheckResponse> for GetHealthCheckResponse {
+impl TryFrom<raw::GetHealthCheckResponse> for model::GetHealthCheckResponse {
     type Error = ProtocolError;
 
     fn try_from(raw: raw::GetHealthCheckResponse) -> Result<Self, Self::Error> {
-        Ok(GetHealthCheckResponse {
+        Ok(model::GetHealthCheckResponse {
             attack: raw.attack.require("attack")?,
             cracker_binary_id: raw.cracker_binary_id.require("crackerBinaryId")?,
             hashes: raw.hashes,
             check_id: raw.check_id.require("checkId")?,
             hashlist_alias: raw.hashlist_alias.require("hashlistAlias")?,
         })
+    }
+}
+
+#[cfg(test)]
+mod task_id_tests {
+    use super::TaskId;
+
+    #[test]
+    fn classifies_the_overloaded_field() {
+        assert_eq!(TaskId::from_raw(None), TaskId::None);
+        assert_eq!(TaskId::from_raw(Some(-1)), TaskId::HealthCheck);
+        assert_eq!(TaskId::from_raw(Some(0)), TaskId::Id(0));
+        assert_eq!(TaskId::from_raw(Some(42)), TaskId::Id(42));
+        assert_eq!(TaskId::from_raw(Some(-99)), TaskId::None);
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::{BenchmarkType, BinaryType, Os};
+    use crate::model;
+    use serde_json::json;
+
+    #[test]
+    fn os_serializes_as_numeric_code() {
+        assert_eq!(
+            serde_json::to_value(Os::from(model::Os::Linux)).unwrap(),
+            json!(0)
+        );
+        assert_eq!(
+            serde_json::to_value(Os::from(model::Os::Windows)).unwrap(),
+            json!(1)
+        );
+        assert_eq!(
+            serde_json::to_value(Os::from(model::Os::Darwin)).unwrap(),
+            json!(2)
+        );
+    }
+
+    #[test]
+    fn benchmark_type_round_trips_through_wire() {
+        for (bench, wire) in [
+            (model::BenchmarkType::Speed, "speed"),
+            (model::BenchmarkType::Run, "run"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(BenchmarkType::from(bench)).unwrap(),
+                json!(wire)
+            );
+            let decoded: BenchmarkType = serde_json::from_value(json!(wire)).unwrap();
+            assert_eq!(model::BenchmarkType::from(decoded), bench);
+        }
+    }
+
+    #[test]
+    fn binary_type_wire_values() {
+        for (binary, wire) in [
+            (model::BinaryType::Extractor, "7zr"),
+            (model::BinaryType::Cracker, "cracker"),
+            (model::BinaryType::Prince, "prince"),
+            (model::BinaryType::Uftpd, "uftpd"),
+            (model::BinaryType::Preprocessor, "preprocessor"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(BinaryType::from(binary)).unwrap(),
+                json!(wire)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::Request;
+    use crate::model::{BenchmarkType, BinaryType, Os};
+    use serde_json::json;
+
+    #[test]
+    fn register_full() {
+        let req = Request::Register {
+            voucher: "my-voucher".to_string(),
+            name: "agent-host".to_string(),
+            cpu_only: Some(true),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({
+                "action": "register",
+                "voucher": "my-voucher",
+                "name": "agent-host",
+                "cpu-only": true
+            })
+        );
+    }
+
+    #[test]
+    fn register_omits_cpu_only_when_none() {
+        let req = Request::Register {
+            voucher: "v".to_string(),
+            name: "host".to_string(),
+            cpu_only: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({"action": "register", "voucher": "v", "name": "host"})
+        );
+    }
+
+    #[test]
+    fn login() {
+        let req = Request::Login {
+            token: "tok123".to_string(),
+            client_signature: "s3-rust-0.1.0".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({"action": "login", "token": "tok123", "clientSignature": "s3-rust-0.1.0"})
+        );
+    }
+
+    #[test]
+    fn test_connection_carries_only_the_action() {
+        assert_eq!(
+            serde_json::to_value(Request::TestConnection).unwrap(),
+            json!({"action": "testConnection"})
+        );
+    }
+
+    #[test]
+    fn update_information_serializes_os_as_numeric_code() {
+        let req = Request::UpdateInformation {
+            token: "tok123".to_string(),
+            uid: "1b4e28ba-2fa1-11d2-883f-0016d3cca427".to_string(),
+            os: Os::Linux.into(),
+            devices: vec![
+                "GeForce RTX 3090".to_string(),
+                "GeForce RTX 3090".to_string(),
+            ],
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({
+                "action": "updateInformation",
+                "token": "tok123",
+                "uid": "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+                "os": 0,
+                "devices": ["GeForce RTX 3090", "GeForce RTX 3090"]
+            })
+        );
+    }
+
+    #[test]
+    fn check_client_version() {
+        let req = Request::CheckClientVersion {
+            token: "tok123".to_string(),
+            version: "0.1.0".to_string(),
+            agent_type: "rust".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({
+                "action": "checkClientVersion",
+                "token": "tok123",
+                "version": "0.1.0",
+                "type": "rust"
+            })
+        );
+    }
+
+    #[test]
+    fn download_binary_cracker_includes_version_id() {
+        let req = Request::DownloadBinary {
+            token: "tok123".to_string(),
+            binary_type: BinaryType::Cracker.into(),
+            binary_version_id: Some(12),
+            preprocessor_id: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({
+                "action": "downloadBinary",
+                "token": "tok123",
+                "type": "cracker",
+                "binaryVersionId": 12
+            })
+        );
+    }
+
+    #[test]
+    fn download_binary_util_omits_optional_ids() {
+        let req = Request::DownloadBinary {
+            token: "tok123".to_string(),
+            binary_type: BinaryType::Extractor.into(),
+            binary_version_id: None,
+            preprocessor_id: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({"action": "downloadBinary", "token": "tok123", "type": "7zr"})
+        );
+    }
+
+    #[test]
+    fn get_task() {
+        let req = Request::GetTask {
+            token: "tok123".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({"action": "getTask", "token": "tok123"})
+        );
+    }
+
+    #[test]
+    fn get_chunk() {
+        let req = Request::GetChunk {
+            token: "tok123".to_string(),
+            task_id: 42,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({"action": "getChunk", "token": "tok123", "taskId": 42})
+        );
+    }
+
+    #[test]
+    fn send_keyspace() {
+        let req = Request::SendKeyspace {
+            token: "tok123".to_string(),
+            task_id: 42,
+            keyspace: 14344385,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({
+                "action": "sendKeyspace",
+                "token": "tok123",
+                "taskId": 42,
+                "keyspace": 14344385
+            })
+        );
+    }
+
+    #[test]
+    fn send_benchmark() {
+        let req = Request::SendBenchmark {
+            token: "tok123".to_string(),
+            task_id: 42,
+            bench_type: BenchmarkType::Speed.into(),
+            result: "3320.1".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({
+                "action": "sendBenchmark",
+                "token": "tok123",
+                "taskId": 42,
+                "type": "speed",
+                "result": "3320.1"
+            })
+        );
+    }
+
+    #[test]
+    fn send_progress_omits_optional_telemetry() {
+        let req = Request::SendProgress {
+            token: "tok123".to_string(),
+            chunk_id: 100,
+            keyspace_progress: 500,
+            relative_progress: 5000,
+            speed: 123456,
+            state: 4,
+            cracks: vec!["5f4dcc3b5aa765d61d8327deb882cf99:password".to_string()],
+            debug_output: None,
+            gpu_temp: None,
+            gpu_util: None,
+            cpu_util: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({
+                "action": "sendProgress",
+                "token": "tok123",
+                "chunkId": 100,
+                "keyspaceProgress": 500,
+                "relativeProgress": 5000,
+                "speed": 123456,
+                "state": 4,
+                "cracks": ["5f4dcc3b5aa765d61d8327deb882cf99:password"]
+            })
+        );
+    }
+
+    #[test]
+    fn send_progress_includes_telemetry_when_present() {
+        let req = Request::SendProgress {
+            token: "tok123".to_string(),
+            chunk_id: 100,
+            keyspace_progress: 500,
+            relative_progress: 5000,
+            speed: 123456,
+            state: 4,
+            cracks: vec![],
+            debug_output: Some(vec!["oops".to_string()]),
+            gpu_temp: Some(vec![55, 60]),
+            gpu_util: Some(vec![98, 99]),
+            cpu_util: Some(vec![12.5]),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["debugOutput"], json!(["oops"]));
+        assert_eq!(v["gpuTemp"], json!([55, 60]));
+        assert_eq!(v["gpuUtil"], json!([98, 99]));
+        assert_eq!(v["cpuUtil"], json!([12.5]));
+    }
+
+    #[test]
+    fn client_error_keeps_null_chunk_id() {
+        let req = Request::ClientError {
+            token: "tok123".to_string(),
+            task_id: 42,
+            chunk_id: None,
+            message: "hashcat exited with code 1".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({
+                "action": "clientError",
+                "token": "tok123",
+                "taskId": 42,
+                "chunkId": null,
+                "message": "hashcat exited with code 1"
+            })
+        );
+    }
+
+    #[test]
+    fn client_error_with_chunk_id() {
+        let req = Request::ClientError {
+            token: "tok123".to_string(),
+            task_id: 42,
+            chunk_id: Some(7),
+            message: "boom".to_string(),
+        };
+
+        assert_eq!(serde_json::to_value(&req).unwrap()["chunkId"], json!(7));
+    }
+
+    #[test]
+    fn get_hashlist() {
+        let req = Request::GetHashlist {
+            token: "tok123".to_string(),
+            hashlist_id: 7,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({"action": "getHashlist", "token": "tok123", "hashlistId": 7})
+        );
+    }
+
+    #[test]
+    fn get_found() {
+        let req = Request::GetFound {
+            token: "tok123".to_string(),
+            hashlist_id: 7,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({"action": "getFound", "token": "tok123", "hashlistId": 7})
+        );
+    }
+
+    #[test]
+    fn get_file() {
+        let req = Request::GetFile {
+            token: "tok123".to_string(),
+            task_id: 42,
+            file: "rockyou.txt".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({
+                "action": "getFile",
+                "token": "tok123",
+                "taskId": 42,
+                "file": "rockyou.txt"
+            })
+        );
+    }
+
+    #[test]
+    fn get_file_status() {
+        let req = Request::GetFileStatus {
+            token: "tok123".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({"action": "getFileStatus", "token": "tok123"})
+        );
+    }
+
+    #[test]
+    fn get_health_check() {
+        let req = Request::GetHealthCheck {
+            token: "tok123".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({"action": "getHealthCheck", "token": "tok123"})
+        );
+    }
+
+    #[test]
+    fn send_health_check() {
+        let req = Request::SendHealthCheck {
+            token: "tok123".to_string(),
+            check_id: 9,
+            num_cracked: 2,
+            start: 1700000000,
+            end: 1700000123,
+            num_gpus: 4,
+            errors: vec![],
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({
+                "action": "sendHealthCheck",
+                "token": "tok123",
+                "checkId": 9,
+                "numCracked": 2,
+                "start": 1700000000,
+                "end": 1700000123,
+                "numGpus": 4,
+                "errors": []
+            })
+        );
+    }
+
+    #[test]
+    fn deregister() {
+        let req = Request::Deregister {
+            token: "tok123".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            json!({"action": "deregister", "token": "tok123"})
+        );
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::raw;
+    use crate::model::{
+        AckResponse, BenchmarkType, BrainConfig, CheckClientVersionResponse, Chunk,
+        DownloadBinaryResponse, GetChunkResponse, GetFileResponse, GetFileStatusResponse,
+        GetFoundResponse, GetHashlistResponse, GetHealthCheckResponse, GetTaskResponse,
+        LoginResponse, Preprocessor, RegisterResponse, ResponseStatus, SendProgressResponse,
+    };
+    use serde::de::DeserializeOwned;
+    use serde_json::json;
+
+    fn decode<Raw, Real>(value: serde_json::Value) -> Real
+    where
+        Raw: DeserializeOwned,
+        Real: TryFrom<Raw>,
+        <Real as TryFrom<Raw>>::Error: std::fmt::Debug,
+    {
+        let raw: Raw = serde_json::from_value(value).expect("raw wire decode failed");
+        Real::try_from(raw).expect("raw -> real conversion failed")
+    }
+
+    fn ack(value: serde_json::Value) -> AckResponse {
+        let raw: raw::AckResponse = serde_json::from_value(value).expect("ack decode failed");
+        raw.into()
+    }
+
+    #[test]
+    fn envelope_reports_success() {
+        let res = ack(json!({"action": "register", "response": "SUCCESS"}));
+
+        assert!(res.envelope.is_success());
+        assert_eq!(res.envelope.action.as_deref(), Some("register"));
+    }
+
+    #[test]
+    fn register_returns_token() {
+        let res: RegisterResponse = decode::<raw::RegisterResponse, _>(json!({
+            "action": "register",
+            "response": "SUCCESS",
+            "token": "abc123"
+        }));
+
+        assert_eq!(res.token, "abc123");
+    }
+
+    #[test]
+    fn register_without_token_is_rejected() {
+        let raw: raw::RegisterResponse =
+            serde_json::from_value(json!({"action": "register", "response": "SUCCESS"})).unwrap();
+
+        assert!(RegisterResponse::try_from(raw).is_err());
+    }
+
+    #[test]
+    fn envelope_carries_error_message() {
+        let res = ack(json!({
+            "action": "updateInformation",
+            "response": "ERROR",
+            "message": "Invalid token!"
+        }));
+
+        assert_eq!(res.envelope.response, ResponseStatus::Error);
+        assert!(!res.envelope.is_success());
+        assert_eq!(res.envelope.message.as_deref(), Some("Invalid token!"));
+    }
+
+    #[test]
+    fn unknown_response_status_falls_back_to_other() {
+        let res = ack(json!({
+            "action": "testConnection",
+            "response": "SOMETHING_ELSE"
+        }));
+
+        assert_eq!(res.envelope.response, ResponseStatus::Other);
+    }
+
+    #[test]
+    fn simple_success_needs_only_the_status() {
+        let res = ack(json!({"action": "deregister", "response": "SUCCESS"}));
+
+        assert!(res.envelope.is_success());
+        assert!(res.envelope.message.is_none());
+    }
+
+    #[test]
+    fn login_fields() {
+        let res: LoginResponse = decode::<raw::LoginResponse, _>(json!({
+            "action": "login",
+            "response": "SUCCESS",
+            "server-version": "0.14.0 (abc)",
+            "multicastEnabled": true,
+            "timeout": 30
+        }));
+
+        assert_eq!(res.server_version, "0.14.0 (abc)");
+        assert!(res.multicast_enabled);
+        assert_eq!(res.timeout, 30);
+    }
+
+    #[test]
+    fn login_without_all_fields_is_rejected() {
+        let raw: raw::LoginResponse =
+            serde_json::from_value(json!({"action": "login", "response": "SUCCESS"})).unwrap();
+
+        assert!(LoginResponse::try_from(raw).is_err());
+    }
+
+    #[test]
+    fn check_client_version_up_to_date() {
+        let res: CheckClientVersionResponse = decode::<raw::CheckClientVersionResponse, _>(json!({
+            "action": "checkClientVersion",
+            "response": "SUCCESS",
+            "version": "OK"
+        }));
+
+        assert_eq!(res, CheckClientVersionResponse::UpToDate);
+    }
+
+    #[test]
+    fn check_client_version_new() {
+        let res: CheckClientVersionResponse = decode::<raw::CheckClientVersionResponse, _>(json!({
+            "action": "checkClientVersion",
+            "response": "SUCCESS",
+            "version": "NEW",
+            "url": "https://server/agents.php?download=3"
+        }));
+
+        assert_eq!(
+            res,
+            CheckClientVersionResponse::NewVersion {
+                url: "https://server/agents.php?download=3".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn check_client_version_new_without_url_is_rejected() {
+        let raw: raw::CheckClientVersionResponse = serde_json::from_value(json!({
+            "action": "checkClientVersion",
+            "response": "SUCCESS",
+            "version": "NEW"
+        }))
+        .unwrap();
+
+        assert!(CheckClientVersionResponse::try_from(raw).is_err());
+    }
+
+    #[test]
+    fn download_binary_utility_is_a_direct_url() {
+        let res: DownloadBinaryResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
+            "action": "downloadBinary",
+            "response": "SUCCESS",
+            "executable": "https://server/static/7zr"
+        }));
+
+        assert_eq!(
+            res,
+            DownloadBinaryResponse::Utility {
+                url: "https://server/static/7zr".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn download_binary_cracker_is_an_archive() {
+        let res: DownloadBinaryResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
+            "action": "downloadBinary",
+            "response": "SUCCESS",
+            "url": "https://server/files/hashcat.7z",
+            "name": "hashcat",
+            "executable": "hashcat.bin"
+        }));
+
+        assert_eq!(
+            res,
+            DownloadBinaryResponse::Archive {
+                url: "https://server/files/hashcat.7z".to_string(),
+                name: "hashcat".to_string(),
+                binary: "hashcat.bin".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn download_binary_preprocessor_carries_commands() {
+        let res: DownloadBinaryResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
+            "action": "downloadBinary",
+            "response": "SUCCESS",
+            "url": "https://server/files/princeprocessor.7z",
+            "name": "princeprocessor",
+            "executable": "pp64.bin",
+            "keyspaceCommand": "--keyspace",
+            "skipCommand": "--skip",
+            "limitCommand": "--limit"
+        }));
+
+        assert_eq!(
+            res,
+            DownloadBinaryResponse::Preprocessor {
+                url: "https://server/files/princeprocessor.7z".to_string(),
+                name: "princeprocessor".to_string(),
+                binary: "pp64.bin".to_string(),
+                keyspace_command: "--keyspace".to_string(),
+                skip_command: "--skip".to_string(),
+                limit_command: "--limit".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn get_task_no_task_available() {
+        let res: GetTaskResponse = decode::<raw::GetTaskResponse, _>(json!({
+            "action": "getTask",
+            "response": "SUCCESS",
+            "taskId": null,
+            "reason": "No suitable task available!"
+        }));
+
+        assert_eq!(
+            res,
+            GetTaskResponse::NoTask {
+                reason: Some("No suitable task available!".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn get_task_health_check() {
+        let res: GetTaskResponse = decode::<raw::GetTaskResponse, _>(json!({
+            "action": "getTask",
+            "response": "SUCCESS",
+            "taskId": -1
+        }));
+
+        assert_eq!(res, GetTaskResponse::HealthCheck);
+    }
+
+    #[test]
+    fn get_task_full_assignment_without_conditional_groups() {
+        let res: GetTaskResponse = decode::<raw::GetTaskResponse, _>(json!({
+            "action": "getTask",
+            "response": "SUCCESS",
+            "taskId": 42,
+            "crackerId": 3,
+            "attackcmd": "#HL# -a 0 wordlist",
+            "cmdpars": " --hash-type=0 ",
+            "hashlistId": 7,
+            "bench": 30,
+            "statustimer": 5,
+            "files": ["wordlist"],
+            "benchType": "speed",
+            "hashlistAlias": "#HL#",
+            "keyspace": 14344385,
+            "usePreprocessor": false,
+            "preprocessor": null,
+            "preprocessorCommand": null,
+            "enforcePipe": false,
+            "slowHash": true,
+            "useBrain": false
+        }));
+
+        let GetTaskResponse::Task(task) = res else {
+            panic!("expected a task assignment, got {res:?}");
+        };
+        assert_eq!(task.task_id, 42);
+        assert_eq!(task.cracker_id, 3);
+        assert_eq!(task.attack_command, "#HL# -a 0 wordlist");
+        assert_eq!(task.bench_type, BenchmarkType::Speed);
+        assert_eq!(task.keyspace, 14344385);
+        assert_eq!(task.files, vec!["wordlist".to_string()]);
+        assert!(task.slow_hash);
+        assert!(task.preprocessor.is_none());
+        assert!(task.brain.is_none());
+    }
+
+    #[test]
+    fn get_task_with_brain_and_preprocessor() {
+        let res: GetTaskResponse = decode::<raw::GetTaskResponse, _>(json!({
+            "action": "getTask",
+            "response": "SUCCESS",
+            "taskId": 1,
+            "crackerId": 3,
+            "attackcmd": "#HL#",
+            "cmdpars": "",
+            "hashlistId": 7,
+            "bench": 30,
+            "statustimer": 5,
+            "files": [],
+            "benchType": "run",
+            "hashlistAlias": "#HL#",
+            "keyspace": 100,
+            "enforcePipe": false,
+            "slowHash": false,
+            "usePreprocessor": true,
+            "preprocessor": 5,
+            "preprocessorCommand": "-c",
+            "useBrain": true,
+            "brainHost": "10.0.0.1",
+            "brainPort": 13743,
+            "brainPass": "secret",
+            "brainFeatures": 3
+        }));
+
+        let GetTaskResponse::Task(task) = res else {
+            panic!("expected a task assignment, got {res:?}");
+        };
+        assert_eq!(
+            task.preprocessor,
+            Some(Preprocessor {
+                id: 5,
+                command: "-c".to_string()
+            })
+        );
+        assert_eq!(
+            task.brain,
+            Some(BrainConfig {
+                host: "10.0.0.1".to_string(),
+                port: 13743,
+                pass: "secret".to_string(),
+                features: 3
+            })
+        );
+    }
+
+    #[test]
+    fn get_task_brain_flag_without_fields_is_rejected() {
+        let raw: raw::GetTaskResponse = serde_json::from_value(json!({
+            "action": "getTask",
+            "response": "SUCCESS",
+            "taskId": 1,
+            "crackerId": 3,
+            "attackcmd": "#HL#",
+            "cmdpars": "",
+            "hashlistId": 7,
+            "bench": 30,
+            "statustimer": 5,
+            "files": [],
+            "benchType": "run",
+            "hashlistAlias": "#HL#",
+            "keyspace": 100,
+            "enforcePipe": false,
+            "slowHash": false,
+            "usePreprocessor": false,
+            "useBrain": true
+        }))
+        .unwrap();
+
+        assert!(GetTaskResponse::try_from(raw).is_err());
+    }
+
+    #[test]
+    fn get_chunk_ok_variant() {
+        let res: GetChunkResponse = decode::<raw::GetChunkResponse, _>(json!({
+            "action": "getChunk",
+            "response": "SUCCESS",
+            "status": "OK",
+            "chunkId": 100,
+            "skip": 0,
+            "length": 5000
+        }));
+
+        assert_eq!(
+            res,
+            GetChunkResponse::Chunk(Chunk {
+                id: 100,
+                skip: 0,
+                length: 5000
+            })
+        );
+    }
+
+    #[test]
+    fn get_chunk_ok_without_chunk_fields_is_rejected() {
+        let raw: raw::GetChunkResponse = serde_json::from_value(json!({
+            "action": "getChunk",
+            "response": "SUCCESS",
+            "status": "OK"
+        }))
+        .unwrap();
+
+        assert!(GetChunkResponse::try_from(raw).is_err());
+    }
+
+    #[test]
+    fn get_chunk_status_only_variants() {
+        for (status, expected) in [
+            ("keyspace_required", GetChunkResponse::KeyspaceRequired),
+            ("benchmark", GetChunkResponse::BenchmarkRequired),
+            ("fully_dispatched", GetChunkResponse::FullyDispatched),
+            ("cracker_update", GetChunkResponse::CrackerUpdate),
+            ("health_check", GetChunkResponse::HealthCheck),
+        ] {
+            let res: GetChunkResponse = decode::<raw::GetChunkResponse, _>(json!({
+                "action": "getChunk",
+                "response": "SUCCESS",
+                "status": status
+            }));
+            assert_eq!(res, expected, "status {status}");
+        }
+    }
+
+    #[test]
+    fn ack_only_actions_decode_from_the_status_alone() {
+        let res = ack(json!({
+            "action": "sendKeyspace",
+            "response": "SUCCESS",
+            "keyspace": "OK"
+        }));
+
+        assert!(res.envelope.is_success());
+    }
+
+    #[test]
+    fn send_progress_stop_branch() {
+        let raw: raw::SendProgressResponse = serde_json::from_value(json!({
+            "action": "sendProgress",
+            "response": "SUCCESS",
+            "cracked": 2,
+            "skipped": 1,
+            "agent": "stop"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            SendProgressResponse::from(raw),
+            SendProgressResponse::Stop {
+                cracked: 2,
+                skipped: 1
+            }
+        );
+    }
+
+    #[test]
+    fn send_progress_continue_branch_carries_zaps() {
+        let raw: raw::SendProgressResponse = serde_json::from_value(json!({
+            "action": "sendProgress",
+            "response": "SUCCESS",
+            "cracked": 2,
+            "skipped": 0,
+            "zaps": ["hashA", "hashB"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            SendProgressResponse::from(raw),
+            SendProgressResponse::Continue {
+                cracked: 2,
+                skipped: 0,
+                zaps: vec!["hashA".to_string(), "hashB".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn send_progress_defaults_to_continue_when_fields_absent() {
+        let raw: raw::SendProgressResponse = serde_json::from_value(json!({
+            "action": "sendProgress",
+            "response": "SUCCESS"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            SendProgressResponse::from(raw),
+            SendProgressResponse::Continue {
+                cracked: 0,
+                skipped: 0,
+                zaps: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn get_file() {
+        let res: GetFileResponse = decode::<raw::GetFileResponse, _>(json!({
+            "action": "getFile",
+            "response": "SUCCESS",
+            "filename": "rockyou.txt",
+            "extension": "txt",
+            "url": "getFile.php?file=1",
+            "filesize": 139921497
+        }));
+
+        assert_eq!(res.filename, "rockyou.txt");
+        assert_eq!(res.extension, "txt");
+        assert_eq!(res.url, "getFile.php?file=1");
+        assert_eq!(res.filesize, 139921497);
+    }
+
+    #[test]
+    fn get_file_without_all_fields_is_rejected() {
+        let raw: raw::GetFileResponse = serde_json::from_value(json!({
+            "action": "getFile",
+            "response": "SUCCESS",
+            "filename": "rockyou.txt"
+        }))
+        .unwrap();
+
+        assert!(GetFileResponse::try_from(raw).is_err());
+    }
+
+    #[test]
+    fn get_file_status() {
+        let res: GetFileStatusResponse = raw::GetFileStatusResponse {
+            filenames: vec!["a.txt".to_string(), "b.7z".to_string()],
+        }
+        .into();
+
+        assert_eq!(res.filenames, vec!["a.txt".to_string(), "b.7z".to_string()]);
+    }
+
+    #[test]
+    fn get_file_status_empty() {
+        let raw: raw::GetFileStatusResponse = serde_json::from_value(json!({
+            "action": "getFileStatus",
+            "response": "SUCCESS"
+        }))
+        .unwrap();
+        let res = GetFileStatusResponse::from(raw);
+        assert!(res.filenames.is_empty());
+    }
+
+    #[test]
+    fn get_hashlist() {
+        let res: GetHashlistResponse = decode::<raw::GetHashlistResponse, _>(json!({
+            "action": "getHashlist",
+            "response": "SUCCESS",
+            "url": "getHashlist.php?hashlist=7"
+        }));
+
+        assert_eq!(res.url, "getHashlist.php?hashlist=7");
+    }
+
+    #[test]
+    fn get_found() {
+        let res: GetFoundResponse = decode::<raw::GetFoundResponse, _>(json!({
+            "action": "getFound",
+            "response": "SUCCESS",
+            "url": "getFound.php?hashlist=7"
+        }));
+
+        assert_eq!(res.url, "getFound.php?hashlist=7");
+    }
+
+    #[test]
+    fn get_health_check() {
+        let res: GetHealthCheckResponse = decode::<raw::GetHealthCheckResponse, _>(json!({
+            "action": "getHealthCheck",
+            "response": "SUCCESS",
+            "attack": " --hash-type=0 #HL# -a 3 ?a?a?a",
+            "crackerBinaryId": 3,
+            "hashes": ["hash1", "hash2"],
+            "checkId": 9,
+            "hashlistAlias": "#HL#"
+        }));
+
+        assert_eq!(res.attack, " --hash-type=0 #HL# -a 3 ?a?a?a");
+        assert_eq!(res.cracker_binary_id, 3);
+        assert_eq!(res.hashes, vec!["hash1".to_string(), "hash2".to_string()]);
+        assert_eq!(res.check_id, 9);
+        assert_eq!(res.hashlist_alias, "#HL#");
+    }
+
+    #[test]
+    fn get_health_check_without_all_fields_is_rejected() {
+        let raw: raw::GetHealthCheckResponse = serde_json::from_value(json!({
+            "action": "getHealthCheck",
+            "response": "SUCCESS",
+            "attack": " --hash-type=0 #HL# -a 3 ?a?a?a"
+        }))
+        .unwrap();
+
+        assert!(GetHealthCheckResponse::try_from(raw).is_err());
     }
 }
