@@ -1,0 +1,442 @@
+use std::fmt;
+
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+
+use crate::model::{BenchmarkType, Os};
+use crate::protocol::{
+    AckResponse, BinaryType, CheckClientVersionResponse, DownloadBinaryResponse, GetChunkResponse,
+    GetFileResponse, GetFileStatusResponse, GetFoundResponse, GetHashlistResponse,
+    GetHealthCheckResponse, GetTaskResponse, LoginResponse, ProtocolError, RegisterResponse,
+    Request, SendProgressResponse, raw,
+};
+use crate::transport::{Transport, TransportError};
+
+#[derive(Debug)]
+pub enum ClientError {
+    Transport(TransportError),
+    Server {
+        action: &'static str,
+        message: Option<String>,
+    },
+    Codec(serde_json::Error),
+    Protocol(ProtocolError),
+}
+
+impl fmt::Display for ClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ClientError::Transport(e) => write!(f, "transport error: {e}"),
+            ClientError::Server { action, message } => match message {
+                Some(m) => write!(f, "server error on '{action}': {m}"),
+                None => write!(f, "server error on '{action}'"),
+            },
+            ClientError::Codec(e) => write!(f, "codec error: {e}"),
+            ClientError::Protocol(e) => write!(f, "protocol error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ClientError::Transport(e) => Some(e),
+            ClientError::Codec(e) => Some(e),
+            ClientError::Protocol(e) => Some(e),
+            ClientError::Server { .. } => None,
+        }
+    }
+}
+
+impl From<TransportError> for ClientError {
+    fn from(e: TransportError) -> Self {
+        ClientError::Transport(e)
+    }
+}
+
+impl From<serde_json::Error> for ClientError {
+    fn from(e: serde_json::Error) -> Self {
+        ClientError::Codec(e)
+    }
+}
+
+impl From<ProtocolError> for ClientError {
+    fn from(e: ProtocolError) -> Self {
+        ClientError::Protocol(e)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProgressReport {
+    pub chunk_id: u64,
+    pub keyspace_progress: u64,
+    pub relative_progress: u64,
+    pub speed: u64,
+    pub state: u32,
+    pub cracks: Vec<String>,
+    pub debug_output: Option<Vec<String>>,
+    pub gpu_temp: Option<Vec<i64>>,
+    pub gpu_util: Option<Vec<i64>>,
+    pub cpu_util: Option<Vec<f64>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Client<T: Transport> {
+    transport: T,
+    token: String,
+}
+
+impl<T: Transport> Client<T> {
+    pub fn new(transport: T) -> Self {
+        Self {
+            transport,
+            token: String::new(),
+        }
+    }
+
+    pub fn with_token(transport: T, token: impl Into<String>) -> Self {
+        Self {
+            transport,
+            token: token.into(),
+        }
+    }
+
+    pub fn set_token(&mut self, token: impl Into<String>) {
+        self.token = token.into();
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    fn token_owned(&self) -> String {
+        self.token.clone()
+    }
+
+    async fn call<R: DeserializeOwned>(
+        &self,
+        action: &'static str,
+        request: Request,
+    ) -> Result<R, ClientError> {
+        let body = serde_json::to_value(&request)?;
+        let value = self.transport.post_json(&body).await?;
+        check_success(&value, action)?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    pub async fn test_connection(&self) -> Result<AckResponse, ClientError> {
+        self.call("testConnection", Request::TestConnection).await
+    }
+
+    pub async fn register(
+        &self,
+        voucher: impl Into<String>,
+        name: impl Into<String>,
+        cpu_only: Option<bool>,
+    ) -> Result<RegisterResponse, ClientError> {
+        let raw: raw::RegisterResponse = self
+            .call(
+                "register",
+                Request::Register {
+                    voucher: voucher.into(),
+                    name: name.into(),
+                    cpu_only,
+                },
+            )
+            .await?;
+        Ok(RegisterResponse::try_from(raw)?)
+    }
+
+    pub async fn login(
+        &self,
+        client_signature: impl Into<String>,
+    ) -> Result<LoginResponse, ClientError> {
+        let raw: raw::LoginResponse = self
+            .call(
+                "login",
+                Request::Login {
+                    token: self.token_owned(),
+                    client_signature: client_signature.into(),
+                },
+            )
+            .await?;
+        Ok(LoginResponse::try_from(raw)?)
+    }
+
+    pub async fn update_information(
+        &self,
+        uid: impl Into<String>,
+        os: Os,
+        devices: Vec<String>,
+    ) -> Result<AckResponse, ClientError> {
+        self.call(
+            "updateInformation",
+            Request::UpdateInformation {
+                token: self.token_owned(),
+                uid: uid.into(),
+                os,
+                devices,
+            },
+        )
+        .await
+    }
+
+    pub async fn check_client_version(
+        &self,
+        version: impl Into<String>,
+        agent_type: impl Into<String>,
+    ) -> Result<CheckClientVersionResponse, ClientError> {
+        let raw: raw::CheckClientVersionResponse = self
+            .call(
+                "checkClientVersion",
+                Request::CheckClientVersion {
+                    token: self.token_owned(),
+                    version: version.into(),
+                    agent_type: agent_type.into(),
+                },
+            )
+            .await?;
+        Ok(CheckClientVersionResponse::try_from(raw)?)
+    }
+
+    pub async fn download_binary(
+        &self,
+        binary_type: BinaryType,
+        binary_version_id: Option<u64>,
+        preprocessor_id: Option<u64>,
+    ) -> Result<DownloadBinaryResponse, ClientError> {
+        let raw: raw::DownloadBinaryResponse = self
+            .call(
+                "downloadBinary",
+                Request::DownloadBinary {
+                    token: self.token_owned(),
+                    binary_type,
+                    binary_version_id,
+                    preprocessor_id,
+                },
+            )
+            .await?;
+        Ok(DownloadBinaryResponse::try_from(raw)?)
+    }
+
+    pub async fn get_task(&self) -> Result<GetTaskResponse, ClientError> {
+        let raw: raw::GetTaskResponse = self
+            .call(
+                "getTask",
+                Request::GetTask {
+                    token: self.token_owned(),
+                },
+            )
+            .await?;
+        Ok(GetTaskResponse::try_from(raw)?)
+    }
+
+    pub async fn get_chunk(&self, task_id: u64) -> Result<GetChunkResponse, ClientError> {
+        let raw: raw::GetChunkResponse = self
+            .call(
+                "getChunk",
+                Request::GetChunk {
+                    token: self.token_owned(),
+                    task_id,
+                },
+            )
+            .await?;
+        Ok(GetChunkResponse::try_from(raw)?)
+    }
+
+    pub async fn send_keyspace(
+        &self,
+        task_id: u64,
+        keyspace: u64,
+    ) -> Result<AckResponse, ClientError> {
+        self.call(
+            "sendKeyspace",
+            Request::SendKeyspace {
+                token: self.token_owned(),
+                task_id,
+                keyspace,
+            },
+        )
+        .await
+    }
+
+    pub async fn send_benchmark(
+        &self,
+        task_id: u64,
+        bench_type: BenchmarkType,
+        result: impl Into<String>,
+    ) -> Result<AckResponse, ClientError> {
+        self.call(
+            "sendBenchmark",
+            Request::SendBenchmark {
+                token: self.token_owned(),
+                task_id,
+                bench_type,
+                result: result.into(),
+            },
+        )
+        .await
+    }
+
+    pub async fn send_progress(
+        &self,
+        report: ProgressReport,
+    ) -> Result<SendProgressResponse, ClientError> {
+        let raw: raw::SendProgressResponse = self
+            .call(
+                "sendProgress",
+                Request::SendProgress {
+                    token: self.token_owned(),
+                    chunk_id: report.chunk_id,
+                    keyspace_progress: report.keyspace_progress,
+                    relative_progress: report.relative_progress,
+                    speed: report.speed,
+                    state: report.state,
+                    cracks: report.cracks,
+                    debug_output: report.debug_output,
+                    gpu_temp: report.gpu_temp,
+                    gpu_util: report.gpu_util,
+                    cpu_util: report.cpu_util,
+                },
+            )
+            .await?;
+        Ok(SendProgressResponse::from(raw))
+    }
+
+    pub async fn client_error(
+        &self,
+        task_id: u64,
+        chunk_id: Option<u64>,
+        message: impl Into<String>,
+    ) -> Result<AckResponse, ClientError> {
+        self.call(
+            "clientError",
+            Request::ClientError {
+                token: self.token_owned(),
+                task_id,
+                chunk_id,
+                message: message.into(),
+            },
+        )
+        .await
+    }
+
+    pub async fn get_hashlist(&self, hashlist_id: u64) -> Result<GetHashlistResponse, ClientError> {
+        let raw: raw::GetHashlistResponse = self
+            .call(
+                "getHashlist",
+                Request::GetHashlist {
+                    token: self.token_owned(),
+                    hashlist_id,
+                },
+            )
+            .await?;
+        Ok(GetHashlistResponse::try_from(raw)?)
+    }
+
+    pub async fn get_found(&self, hashlist_id: u64) -> Result<GetFoundResponse, ClientError> {
+        let raw: raw::GetFoundResponse = self
+            .call(
+                "getFound",
+                Request::GetFound {
+                    token: self.token_owned(),
+                    hashlist_id,
+                },
+            )
+            .await?;
+        Ok(GetFoundResponse::try_from(raw)?)
+    }
+
+    pub async fn get_file(
+        &self,
+        task_id: u64,
+        file: impl Into<String>,
+    ) -> Result<GetFileResponse, ClientError> {
+        let raw: raw::GetFileResponse = self
+            .call(
+                "getFile",
+                Request::GetFile {
+                    token: self.token_owned(),
+                    task_id,
+                    file: file.into(),
+                },
+            )
+            .await?;
+        Ok(GetFileResponse::try_from(raw)?)
+    }
+
+    pub async fn get_file_status(&self) -> Result<GetFileStatusResponse, ClientError> {
+        let raw: raw::GetFileStatusResponse = self
+            .call(
+                "getFileStatus",
+                Request::GetFileStatus {
+                    token: self.token_owned(),
+                },
+            )
+            .await?;
+        Ok(GetFileStatusResponse::from(raw))
+    }
+
+    pub async fn get_health_check(&self) -> Result<GetHealthCheckResponse, ClientError> {
+        let raw: raw::GetHealthCheckResponse = self
+            .call(
+                "getHealthCheck",
+                Request::GetHealthCheck {
+                    token: self.token_owned(),
+                },
+            )
+            .await?;
+        Ok(GetHealthCheckResponse::try_from(raw)?)
+    }
+
+    pub async fn send_health_check(
+        &self,
+        check_id: u64,
+        num_cracked: u64,
+        start: i64,
+        end: i64,
+        num_gpus: u32,
+        errors: Vec<String>,
+    ) -> Result<AckResponse, ClientError> {
+        self.call(
+            "sendHealthCheck",
+            Request::SendHealthCheck {
+                token: self.token_owned(),
+                check_id,
+                num_cracked,
+                start,
+                end,
+                num_gpus,
+                errors,
+            },
+        )
+        .await
+    }
+
+    pub async fn deregister(&self) -> Result<AckResponse, ClientError> {
+        self.call(
+            "deregister",
+            Request::Deregister {
+                token: self.token_owned(),
+            },
+        )
+        .await
+    }
+}
+
+fn check_success(value: &Value, action: &'static str) -> Result<(), ClientError> {
+    match value.get("response").and_then(Value::as_str) {
+        Some("SUCCESS") => Ok(()),
+        _ => Err(ClientError::Server {
+            action,
+            message: value
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }),
+    }
+}
