@@ -172,7 +172,7 @@ pub struct ProgressReport {
     pub relative_progress: u64,
     pub speed: u64,
     pub state: u32,
-    pub cracks: Vec<String>,
+    pub cracks: Vec<Vec<String>>,
     pub debug_output: Option<Vec<String>>,
     pub gpu_temp: Option<Vec<i64>>,
     pub gpu_util: Option<Vec<i64>>,

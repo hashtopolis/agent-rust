@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use support::transport::{FailingTransport, MockTransport};
 
-const TOKEN: &str = "tok";
+const TOKEN: &str = "GHhgdf(/&";
 
 fn mock_client_returning(reply: Value) -> Client<MockTransport> {
     Client::with_token(MockTransport::new(reply), TOKEN)
@@ -57,20 +57,23 @@ async fn test_connection_error() {
 #[tokio::test]
 async fn register_returns_token() {
     let client = mock_client_returning(
-        json!({"action": "register", "response": "SUCCESS", "token": "newtok"}),
+        json!({"action": "register", "response": "SUCCESS", "token": "GHhgdf(/&"}),
     );
 
-    let res = client.register("v", "host", Some(true)).await.unwrap();
+    let res = client
+        .register("89GD78tf", "client name", Some(true))
+        .await
+        .unwrap();
 
     assert_eq!(
         res,
         RegisterResponse {
-            token: "newtok".to_string()
+            token: "GHhgdf(/&".to_string()
         }
     );
     assert_client_sent_body(
         &client,
-        json!({"action": "register", "voucher": "v", "name": "host", "cpu-only": true}),
+        json!({"action": "register", "voucher": "89GD78tf", "name": "client name", "cpu-only": true}),
     );
 }
 
@@ -78,7 +81,10 @@ async fn register_returns_token() {
 async fn register_error() {
     let client = mock_client_returning(error_reply("register"));
 
-    assert_server_error(client.register("v", "host", None).await, "register");
+    assert_server_error(
+        client.register("89GD78tf", "client name", None).await,
+        "register",
+    );
 }
 
 #[tokio::test]
@@ -91,7 +97,7 @@ async fn login_returns_session_details() {
         "server-version": "0.14.0"
     }));
 
-    let res = client.login("sig").await.unwrap();
+    let res = client.login("generic-python").await.unwrap();
 
     assert_eq!(
         res,
@@ -103,7 +109,7 @@ async fn login_returns_session_details() {
     );
     assert_client_sent_body(
         &client,
-        json!({"action": "login", "token": TOKEN, "clientSignature": "sig"}),
+        json!({"action": "login", "token": TOKEN, "clientSignature": "generic-python"}),
     );
 }
 
@@ -111,7 +117,7 @@ async fn login_returns_session_details() {
 async fn login_error() {
     let client = mock_client_returning(error_reply("login"));
 
-    assert_server_error(client.login("sig").await, "login");
+    assert_server_error(client.login("generic-python").await, "login");
 }
 
 #[tokio::test]
@@ -120,7 +126,11 @@ async fn update_information_returns_ack() {
         mock_client_returning(json!({"action": "updateInformation", "response": "SUCCESS"}));
 
     let res = client
-        .update_information("uid", Os::Linux, vec!["GPU0".to_string()])
+        .update_information(
+            "230-34-345-345",
+            Os::Linux,
+            vec!["ATI HD7970".to_string(), "ATI HD7970".to_string()],
+        )
         .await
         .unwrap();
 
@@ -130,9 +140,9 @@ async fn update_information_returns_ack() {
         json!({
             "action": "updateInformation",
             "token": TOKEN,
-            "uid": "uid",
+            "uid": "230-34-345-345",
             "os": 0,
-            "devices": ["GPU0"]
+            "devices": ["ATI HD7970", "ATI HD7970"]
         }),
     );
 }
@@ -142,7 +152,9 @@ async fn update_information_error() {
     let client = mock_client_returning(error_reply("updateInformation"));
 
     assert_server_error(
-        client.update_information("uid", Os::Linux, vec![]).await,
+        client
+            .update_information("230-34-345-345", Os::Linux, vec![])
+            .await,
         "updateInformation",
     );
 }
@@ -155,12 +167,15 @@ async fn check_client_version_returns_up_to_date() {
         "version": "OK"
     }));
 
-    let res = client.check_client_version("1.0", "rust").await.unwrap();
+    let res = client
+        .check_client_version("0.43.5", "csharp")
+        .await
+        .unwrap();
 
     assert_eq!(res, CheckClientVersionResponse::UpToDate);
     assert_client_sent_body(
         &client,
-        json!({"action": "checkClientVersion", "token": TOKEN, "version": "1.0", "type": "rust"}),
+        json!({"action": "checkClientVersion", "token": TOKEN, "version": "0.43.5", "type": "csharp"}),
     );
 }
 
@@ -170,15 +185,18 @@ async fn check_client_version_returns_new_version() {
         "action": "checkClientVersion",
         "response": "SUCCESS",
         "version": "NEW",
-        "url": "https://hashtopolis.example.com/agents/htp-agent-2.0"
+        "url": "https://example.com/getclient.php"
     }));
 
-    let res = client.check_client_version("1.0", "rust").await.unwrap();
+    let res = client
+        .check_client_version("0.43.5", "csharp")
+        .await
+        .unwrap();
 
     assert_eq!(
         res,
         CheckClientVersionResponse::NewVersion {
-            url: "https://hashtopolis.example.com/agents/htp-agent-2.0".to_string()
+            url: "https://example.com/getclient.php".to_string()
         }
     );
 }
@@ -188,7 +206,7 @@ async fn check_client_version_error() {
     let client = mock_client_returning(error_reply("checkClientVersion"));
 
     assert_server_error(
-        client.check_client_version("1.0", "rust").await,
+        client.check_client_version("0.43.5", "csharp").await,
         "checkClientVersion",
     );
 }
@@ -198,27 +216,27 @@ async fn download_binary_returns_archive() {
     let client = mock_client_returning(json!({
         "action": "downloadBinary",
         "response": "SUCCESS",
-        "url": "https://hashtopolis.example.com/files/hashcat-6.2.6.7z",
-        "name": "hashcat",
-        "executable": "hashcat.bin"
+        "url": "https://hashcat.net/files/hashcat-3.01.7z",
+        "name": "Hashcat",
+        "executable": "hashcat64.bin"
     }));
 
     let res = client
-        .download_binary(BinaryType::Cracker, Some(3), None)
+        .download_binary(BinaryType::Cracker, Some(45), None)
         .await
         .unwrap();
 
     assert_eq!(
         res,
         DownloadBinaryResponse::Archive {
-            url: "https://hashtopolis.example.com/files/hashcat-6.2.6.7z".to_string(),
-            name: "hashcat".to_string(),
-            binary: "hashcat.bin".to_string()
+            url: "https://hashcat.net/files/hashcat-3.01.7z".to_string(),
+            name: "Hashcat".to_string(),
+            binary: "hashcat64.bin".to_string()
         }
     );
     assert_client_sent_body(
         &client,
-        json!({"action": "downloadBinary", "token": TOKEN, "type": "cracker", "binaryVersionId": 3}),
+        json!({"action": "downloadBinary", "token": TOKEN, "type": "cracker", "binaryVersionId": 45}),
     );
 }
 
@@ -227,7 +245,7 @@ async fn download_binary_returns_utility() {
     let client = mock_client_returning(json!({
         "action": "downloadBinary",
         "response": "SUCCESS",
-        "executable": "https://hashtopolis.example.com/files/7zr"
+        "executable": "https://example.com/getapp.php"
     }));
 
     let res = client
@@ -238,7 +256,7 @@ async fn download_binary_returns_utility() {
     assert_eq!(
         res,
         DownloadBinaryResponse::Utility {
-            url: "https://hashtopolis.example.com/files/7zr".to_string()
+            url: "https://example.com/getapp.php".to_string()
         }
     );
 }
@@ -248,9 +266,9 @@ async fn download_binary_returns_preprocessor() {
     let client = mock_client_returning(json!({
         "action": "downloadBinary",
         "response": "SUCCESS",
-        "url": "https://hashtopolis.example.com/files/prince.7z",
-        "name": "princeprocessor",
-        "executable": "pp64.bin",
+        "url": "https://github.com/hashcat/princeprocessor/releases/download/v0.22/princeprocessor-0.22.7z",
+        "name": "Prince",
+        "executable": "pp.bin",
         "keyspaceCommand": "--keyspace",
         "skipCommand": "--skip",
         "limitCommand": "--limit"
@@ -264,9 +282,9 @@ async fn download_binary_returns_preprocessor() {
     assert_eq!(
         res,
         DownloadBinaryResponse::Preprocessor {
-            url: "https://hashtopolis.example.com/files/prince.7z".to_string(),
-            name: "princeprocessor".to_string(),
-            binary: "pp64.bin".to_string(),
+            url: "https://github.com/hashcat/princeprocessor/releases/download/v0.22/princeprocessor-0.22.7z".to_string(),
+            name: "Prince".to_string(),
+            binary: "pp.bin".to_string(),
             keyspace_command: "--keyspace".to_string(),
             skip_command: "--skip".to_string(),
             limit_command: "--limit".to_string()
@@ -292,7 +310,7 @@ async fn get_task_returns_no_task_when_none_available() {
         "action": "getTask",
         "response": "SUCCESS",
         "taskId": null,
-        "reason": "none available"
+        "reason": "No task available!"
     }));
 
     let res = client.get_task().await.unwrap();
@@ -300,7 +318,7 @@ async fn get_task_returns_no_task_when_none_available() {
     assert_eq!(
         res,
         GetTaskResponse::NoTask {
-            reason: Some("none available".to_string())
+            reason: Some("No task available!".to_string())
         }
     );
     assert_client_sent_body(&client, json!({"action": "getTask", "token": TOKEN}));
@@ -337,26 +355,26 @@ async fn get_task_returns_task_assignment() {
     let client = mock_client_returning(json!({
         "action": "getTask",
         "response": "SUCCESS",
-        "taskId": 42,
-        "crackerId": 3,
-        "attackcmd": "#HL# -a 0 -m 0 rockyou.txt",
-        "cmdpars": "--force",
-        "hashlistId": 7,
+        "taskId": 25,
+        "crackerId": 45,
+        "attackcmd": "#HL# -a 3 ?a?a?a?a --hash-type=0",
+        "cmdpars": " --hash-type=0 ",
+        "hashlistId": 13,
         "bench": 30,
         "statustimer": 5,
-        "files": ["rockyou.txt"],
+        "files": ["rockyou.txt", "wordlist.txt"],
         "benchType": "speed",
         "hashlistAlias": "#HL#",
-        "keyspace": 14344385,
-        "enforcePipe": true,
+        "keyspace": 0,
+        "enforcePipe": false,
         "slowHash": false,
         "usePreprocessor": true,
-        "preprocessor": 1,
-        "preprocessorCommand": "pp64",
+        "preprocessor": 2,
+        "preprocessorCommand": "wordlist.txt",
         "useBrain": true,
-        "brainHost": "10.0.0.1",
-        "brainPort": 13000,
-        "brainPass": "secret",
+        "brainHost": "10.20.30.40",
+        "brainPort": 1234,
+        "brainPass": "password",
         "brainFeatures": 3
     }));
 
@@ -365,27 +383,27 @@ async fn get_task_returns_task_assignment() {
     assert_eq!(
         res,
         GetTaskResponse::Task(Box::new(TaskAssignment {
-            task_id: 42,
-            cracker_id: 3,
-            attack_command: "#HL# -a 0 -m 0 rockyou.txt".to_string(),
-            cmd_parameters: "--force".to_string(),
-            hashlist_id: 7,
+            task_id: 25,
+            cracker_id: 45,
+            attack_command: "#HL# -a 3 ?a?a?a?a --hash-type=0".to_string(),
+            cmd_parameters: " --hash-type=0 ".to_string(),
+            hashlist_id: 13,
             benchmark: 30,
             status_timer: 5,
-            files: vec!["rockyou.txt".to_string()],
+            files: vec!["rockyou.txt".to_string(), "wordlist.txt".to_string()],
             bench_type: BenchmarkType::Speed,
             hashlist_alias: "#HL#".to_string(),
-            keyspace: 14344385,
-            enforce_pipe: true,
+            keyspace: 0,
+            enforce_pipe: false,
             slow_hash: false,
             preprocessor: Some(Preprocessor {
-                id: 1,
-                command: "pp64".to_string()
+                id: 2,
+                command: "wordlist.txt".to_string()
             }),
             brain: Some(BrainConfig {
-                host: "10.0.0.1".to_string(),
-                port: 13000,
-                pass: "secret".to_string(),
+                host: "10.20.30.40".to_string(),
+                port: 1234,
+                pass: "password".to_string(),
                 features: 3
             })
         }))
@@ -405,9 +423,9 @@ async fn get_chunk_returns_chunk() {
         "action": "getChunk",
         "response": "SUCCESS",
         "status": "OK",
-        "chunkId": 10,
-        "skip": 0,
-        "length": 100
+        "chunkId": 13,
+        "skip": 45000,
+        "length": 10000
     }));
 
     let res = client.get_chunk(5).await.unwrap();
@@ -415,9 +433,9 @@ async fn get_chunk_returns_chunk() {
     assert_eq!(
         res,
         GetChunkResponse::Chunk(Chunk {
-            id: 10,
-            skip: 0,
-            length: 100
+            id: 13,
+            skip: 45000,
+            length: 10000
         })
     );
     assert_client_sent_body(
@@ -460,12 +478,12 @@ async fn send_keyspace_returns_ack() {
         json!({"action": "sendKeyspace", "response": "SUCCESS", "keyspace": "OK"}),
     );
 
-    let res = client.send_keyspace(5, 1000).await.unwrap();
+    let res = client.send_keyspace(35, 568000).await.unwrap();
 
     assert!(res.envelope.is_success());
     assert_client_sent_body(
         &client,
-        json!({"action": "sendKeyspace", "token": TOKEN, "taskId": 5, "keyspace": 1000}),
+        json!({"action": "sendKeyspace", "token": TOKEN, "taskId": 35, "keyspace": 568000}),
     );
 }
 
@@ -473,7 +491,7 @@ async fn send_keyspace_returns_ack() {
 async fn send_keyspace_error() {
     let client = mock_client_returning(error_reply("sendKeyspace"));
 
-    assert_server_error(client.send_keyspace(5, 1000).await, "sendKeyspace");
+    assert_server_error(client.send_keyspace(35, 568000).await, "sendKeyspace");
 }
 
 #[tokio::test]
@@ -483,7 +501,7 @@ async fn send_benchmark_returns_ack() {
     );
 
     let res = client
-        .send_benchmark(5, BenchmarkType::Speed, "0.5")
+        .send_benchmark(35, BenchmarkType::Speed, "674:674.74")
         .await
         .unwrap();
 
@@ -493,9 +511,9 @@ async fn send_benchmark_returns_ack() {
         json!({
             "action": "sendBenchmark",
             "token": TOKEN,
-            "taskId": 5,
+            "taskId": 35,
             "type": "speed",
-            "result": "0.5"
+            "result": "674:674.74"
         }),
     );
 }
@@ -505,7 +523,9 @@ async fn send_benchmark_error() {
     let client = mock_client_returning(error_reply("sendBenchmark"));
 
     assert_server_error(
-        client.send_benchmark(5, BenchmarkType::Speed, "0.5").await,
+        client
+            .send_benchmark(35, BenchmarkType::Speed, "674:674.74")
+            .await,
         "sendBenchmark",
     );
 }
@@ -515,18 +535,31 @@ async fn send_progress_returns_stop() {
     let client = mock_client_returning(json!({
         "action": "sendProgress",
         "response": "SUCCESS",
-        "cracked": 1,
+        "cracked": 2,
         "skipped": 0,
         "agent": "stop"
     }));
     let res = client
         .send_progress(ProgressReport {
-            chunk_id: 1,
-            keyspace_progress: 2,
-            relative_progress: 3,
-            speed: 4,
-            state: 5,
-            cracks: vec!["h".to_string()],
+            chunk_id: 35,
+            keyspace_progress: 568000,
+            relative_progress: 4545,
+            speed: 570000,
+            state: 3,
+            cracks: vec![
+                vec![
+                    "7fde65673fd28736423f23423786f".to_string(),
+                    "thisisplain".to_string(),
+                    "746869736973706c61696e".to_string(),
+                    "787523889".to_string(),
+                ],
+                vec![
+                    "7fde65673f28987f7423f2342378f".to_string(),
+                    "otherplain".to_string(),
+                    "6f74686572706c61696e".to_string(),
+                    "78652".to_string(),
+                ],
+            ],
             ..Default::default()
         })
         .await
@@ -535,7 +568,7 @@ async fn send_progress_returns_stop() {
     assert_eq!(
         res,
         SendProgressResponse::Stop {
-            cracked: 1,
+            cracked: 2,
             skipped: 0
         }
     );
@@ -544,12 +577,15 @@ async fn send_progress_returns_stop() {
         json!({
             "action": "sendProgress",
             "token": TOKEN,
-            "chunkId": 1,
-            "keyspaceProgress": 2,
-            "relativeProgress": 3,
-            "speed": 4,
-            "state": 5,
-            "cracks": ["h"]
+            "chunkId": 35,
+            "keyspaceProgress": 568000,
+            "relativeProgress": 4545,
+            "speed": 570000,
+            "state": 3,
+            "cracks": [
+                ["7fde65673fd28736423f23423786f", "thisisplain", "746869736973706c61696e", "787523889"],
+                ["7fde65673f28987f7423f2342378f", "otherplain", "6f74686572706c61696e", "78652"]
+            ]
         }),
     );
 }
@@ -560,8 +596,8 @@ async fn send_progress_returns_continue() {
         "action": "sendProgress",
         "response": "SUCCESS",
         "cracked": 2,
-        "skipped": 1,
-        "zaps": ["hash1", "hash2"]
+        "skipped": 0,
+        "zaps": ["87634876fe7f7df5e76f56a757", "7863487563874ffefe67575745"]
     }));
 
     let res = client
@@ -573,8 +609,11 @@ async fn send_progress_returns_continue() {
         res,
         SendProgressResponse::Continue {
             cracked: 2,
-            skipped: 1,
-            zaps: vec!["hash1".to_string(), "hash2".to_string()]
+            skipped: 0,
+            zaps: vec![
+                "87634876fe7f7df5e76f56a757".to_string(),
+                "7863487563874ffefe67575745".to_string()
+            ]
         }
     );
 }
@@ -593,7 +632,10 @@ async fn send_progress_error() {
 async fn client_error_returns_ack() {
     let client = mock_client_returning(json!({"action": "clientError", "response": "SUCCESS"}));
 
-    let res = client.client_error(5, Some(9), "boom").await.unwrap();
+    let res = client
+        .client_error(45, Some(1), "This is a sample error message!")
+        .await
+        .unwrap();
 
     assert!(res.envelope.is_success());
     assert_client_sent_body(
@@ -601,9 +643,9 @@ async fn client_error_returns_ack() {
         json!({
             "action": "clientError",
             "token": TOKEN,
-            "taskId": 5,
-            "chunkId": 9,
-            "message": "boom"
+            "taskId": 45,
+            "chunkId": 1,
+            "message": "This is a sample error message!"
         }),
     );
 }
@@ -612,26 +654,31 @@ async fn client_error_returns_ack() {
 async fn client_error_error() {
     let client = mock_client_returning(error_reply("clientError"));
 
-    assert_server_error(client.client_error(5, None, "boom").await, "clientError");
+    assert_server_error(
+        client
+            .client_error(45, None, "This is a sample error message!")
+            .await,
+        "clientError",
+    );
 }
 
 #[tokio::test]
 async fn get_hashlist_returns_url() {
     let client = mock_client_returning(
-        json!({"action": "getHashlist", "response": "SUCCESS", "url": "https://hashtopolis.example.com/getHashlist/7"}),
+        json!({"action": "getHashlist", "response": "SUCCESS", "url": "get.php?hashlist=5&token=GHhgdf(/&"}),
     );
 
-    let res = client.get_hashlist(7).await.unwrap();
+    let res = client.get_hashlist(23).await.unwrap();
 
     assert_eq!(
         res,
         GetHashlistResponse {
-            url: "https://hashtopolis.example.com/getHashlist/7".to_string()
+            url: "get.php?hashlist=5&token=GHhgdf(/&".to_string()
         }
     );
     assert_client_sent_body(
         &client,
-        json!({"action": "getHashlist", "token": TOKEN, "hashlistId": 7}),
+        json!({"action": "getHashlist", "token": TOKEN, "hashlistId": 23}),
     );
 }
 
@@ -639,7 +686,7 @@ async fn get_hashlist_returns_url() {
 async fn get_hashlist_error() {
     let client = mock_client_returning(error_reply("getHashlist"));
 
-    assert_server_error(client.get_hashlist(7).await, "getHashlist");
+    assert_server_error(client.get_hashlist(23).await, "getHashlist");
 }
 
 #[tokio::test]
@@ -675,25 +722,25 @@ async fn get_file_returns_file_metadata() {
         "action": "getFile",
         "response": "SUCCESS",
         "filename": "rockyou.txt",
-        "extension": "txt",
-        "url": "https://hashtopolis.example.com/files/rockyou.txt",
-        "filesize": 100
+        "extension": ".txt",
+        "url": "get.php?file=5&token=GHhgdf(/&",
+        "filesize": 267729
     }));
 
-    let res = client.get_file(5, "rockyou.txt").await.unwrap();
+    let res = client.get_file(56, "rockyou.txt").await.unwrap();
 
     assert_eq!(
         res,
         GetFileResponse {
             filename: "rockyou.txt".to_string(),
-            extension: "txt".to_string(),
-            url: "https://hashtopolis.example.com/files/rockyou.txt".to_string(),
-            filesize: 100
+            extension: ".txt".to_string(),
+            url: "get.php?file=5&token=GHhgdf(/&".to_string(),
+            filesize: 267729
         }
     );
     assert_client_sent_body(
         &client,
-        json!({"action": "getFile", "token": TOKEN, "taskId": 5, "file": "rockyou.txt"}),
+        json!({"action": "getFile", "token": TOKEN, "taskId": 56, "file": "rockyou.txt"}),
     );
 }
 
@@ -701,7 +748,7 @@ async fn get_file_returns_file_metadata() {
 async fn get_file_error() {
     let client = mock_client_returning(error_reply("getFile"));
 
-    assert_server_error(client.get_file(5, "x").await, "getFile");
+    assert_server_error(client.get_file(56, "rockyou.txt").await, "getFile");
 }
 
 #[tokio::test]
@@ -709,7 +756,7 @@ async fn get_file_status_returns_filenames() {
     let client = mock_client_returning(json!({
         "action": "getFileStatus",
         "response": "SUCCESS",
-        "filenames": ["a.txt"]
+        "filenames": ["top10000.txt"]
     }));
 
     let res = client.get_file_status().await.unwrap();
@@ -717,7 +764,7 @@ async fn get_file_status_returns_filenames() {
     assert_eq!(
         res,
         GetFileStatusResponse {
-            filenames: vec!["a.txt".to_string()]
+            filenames: vec!["top10000.txt".to_string()]
         }
     );
     assert_client_sent_body(&client, json!({"action": "getFileStatus", "token": TOKEN}));
@@ -735,10 +782,10 @@ async fn get_health_check_returns_parameters() {
     let client = mock_client_returning(json!({
         "action": "getHealthCheck",
         "response": "SUCCESS",
-        "attack": "a",
-        "crackerBinaryId": 3,
-        "hashes": ["h"],
-        "checkId": 9,
+        "attack": "#HL# -a 3 -1 ?l?u?d ?1?1?1?1?1",
+        "crackerBinaryId": 1,
+        "hashes": ["9f650d4ef70eead895e7a03ce0f83e88", "24a7bdfd14bca7f9d14154c0800a833d"],
+        "checkId": 7,
         "hashlistAlias": "#HL#"
     }));
 
@@ -747,10 +794,13 @@ async fn get_health_check_returns_parameters() {
     assert_eq!(
         res,
         GetHealthCheckResponse {
-            attack: "a".to_string(),
-            cracker_binary_id: 3,
-            hashes: vec!["h".to_string()],
-            check_id: 9,
+            attack: "#HL# -a 3 -1 ?l?u?d ?1?1?1?1?1".to_string(),
+            cracker_binary_id: 1,
+            hashes: vec![
+                "9f650d4ef70eead895e7a03ce0f83e88".to_string(),
+                "24a7bdfd14bca7f9d14154c0800a833d".to_string()
+            ],
+            check_id: 7,
             hashlist_alias: "#HL#".to_string()
         }
     );
@@ -770,7 +820,17 @@ async fn send_health_check_accepts_ok_response() {
     let client = mock_client_returning(json!({"action": "sendHealthCheck", "response": "OK"}));
 
     let res = client
-        .send_health_check(9, 5, 100, 200, 2, vec!["e".to_string()])
+        .send_health_check(
+            7,
+            23,
+            1536306884,
+            1536306902,
+            1,
+            vec![
+                "nvmlDeviceGetTemperatureThreshold(): Not Supported".to_string(),
+                "nvmlDeviceGetTemperatureThreshold(): Not Supported".to_string(),
+            ],
+        )
         .await
         .unwrap();
 
@@ -780,12 +840,15 @@ async fn send_health_check_accepts_ok_response() {
         json!({
             "action": "sendHealthCheck",
             "token": TOKEN,
-            "checkId": 9,
-            "numCracked": 5,
-            "start": 100,
-            "end": 200,
-            "numGpus": 2,
-            "errors": ["e"]
+            "checkId": 7,
+            "numCracked": 23,
+            "start": 1536306884,
+            "end": 1536306902,
+            "numGpus": 1,
+            "errors": [
+                "nvmlDeviceGetTemperatureThreshold(): Not Supported",
+                "nvmlDeviceGetTemperatureThreshold(): Not Supported"
+            ]
         }),
     );
 }
@@ -795,7 +858,9 @@ async fn send_health_check_error() {
     let client = mock_client_returning(error_reply("sendHealthCheck"));
 
     assert_server_error(
-        client.send_health_check(9, 5, 100, 200, 2, vec![]).await,
+        client
+            .send_health_check(7, 23, 1536306884, 1536306902, 1, vec![])
+            .await,
         "sendHealthCheck",
     );
 }
@@ -805,7 +870,10 @@ async fn send_health_check_rejects_generic_success() {
     // This endpoint expects "OK" specifically; a stray "SUCCESS" is an error.
     let client = mock_client_returning(json!({"action": "sendHealthCheck", "response": "SUCCESS"}));
 
-    match client.send_health_check(9, 5, 100, 200, 2, vec![]).await {
+    match client
+        .send_health_check(7, 23, 1536306884, 1536306902, 1, vec![])
+        .await
+    {
         Err(ClientError::Server { action, .. }) => assert_eq!(action, "sendHealthCheck"),
         other => panic!("expected server error, got {other:?}"),
     }

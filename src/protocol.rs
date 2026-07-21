@@ -218,7 +218,7 @@ pub(crate) enum Request {
         relative_progress: u64,
         speed: u64,
         state: u32,
-        cracks: Vec<String>,
+        cracks: Vec<Vec<String>>,
 
         #[serde(rename = "debugOutput", skip_serializing_if = "Option::is_none")]
         debug_output: Option<Vec<String>>,
@@ -817,8 +817,8 @@ mod request_tests {
     #[test]
     fn register_full() {
         let req = Request::Register {
-            voucher: "my-voucher".to_string(),
-            name: "agent-host".to_string(),
+            voucher: "89GD78tf".to_string(),
+            name: "client name".to_string(),
             cpu_only: Some(true),
         };
 
@@ -826,8 +826,8 @@ mod request_tests {
             serde_json::to_value(&req).unwrap(),
             json!({
                 "action": "register",
-                "voucher": "my-voucher",
-                "name": "agent-host",
+                "voucher": "89GD78tf",
+                "name": "client name",
                 "cpu-only": true
             })
         );
@@ -836,27 +836,27 @@ mod request_tests {
     #[test]
     fn register_omits_cpu_only_when_none() {
         let req = Request::Register {
-            voucher: "v".to_string(),
-            name: "host".to_string(),
+            voucher: "89GD78tf".to_string(),
+            name: "client name".to_string(),
             cpu_only: None,
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
-            json!({"action": "register", "voucher": "v", "name": "host"})
+            json!({"action": "register", "voucher": "89GD78tf", "name": "client name"})
         );
     }
 
     #[test]
     fn login() {
         let req = Request::Login {
-            token: "tok123".to_string(),
-            client_signature: "s3-rust-0.1.0".to_string(),
+            token: "GHhgdf(/&".to_string(),
+            client_signature: "generic-python".to_string(),
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
-            json!({"action": "login", "token": "tok123", "clientSignature": "s3-rust-0.1.0"})
+            json!({"action": "login", "token": "GHhgdf(/&", "clientSignature": "generic-python"})
         );
     }
 
@@ -871,23 +871,20 @@ mod request_tests {
     #[test]
     fn update_information_serializes_os_as_numeric_code() {
         let req = Request::UpdateInformation {
-            token: "tok123".to_string(),
-            uid: "1b4e28ba-2fa1-11d2-883f-0016d3cca427".to_string(),
+            token: "GHhgdf(/&".to_string(),
+            uid: "230-34-345-345".to_string(),
             os: Os::Linux.into(),
-            devices: vec![
-                "GeForce RTX 3090".to_string(),
-                "GeForce RTX 3090".to_string(),
-            ],
+            devices: vec!["ATI HD7970".to_string(), "ATI HD7970".to_string()],
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
             json!({
                 "action": "updateInformation",
-                "token": "tok123",
-                "uid": "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+                "token": "GHhgdf(/&",
+                "uid": "230-34-345-345",
                 "os": 0,
-                "devices": ["GeForce RTX 3090", "GeForce RTX 3090"]
+                "devices": ["ATI HD7970", "ATI HD7970"]
             })
         );
     }
@@ -895,18 +892,18 @@ mod request_tests {
     #[test]
     fn check_client_version() {
         let req = Request::CheckClientVersion {
-            token: "tok123".to_string(),
-            version: "0.1.0".to_string(),
-            agent_type: "rust".to_string(),
+            token: "GHhgdf(/&".to_string(),
+            version: "0.43.5".to_string(),
+            agent_type: "csharp".to_string(),
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
             json!({
                 "action": "checkClientVersion",
-                "token": "tok123",
-                "version": "0.1.0",
-                "type": "rust"
+                "token": "GHhgdf(/&",
+                "version": "0.43.5",
+                "type": "csharp"
             })
         );
     }
@@ -914,9 +911,9 @@ mod request_tests {
     #[test]
     fn download_binary_cracker_includes_version_id() {
         let req = Request::DownloadBinary {
-            token: "tok123".to_string(),
+            token: "GHhgdf(/&".to_string(),
             binary_type: BinaryType::Cracker.into(),
-            binary_version_id: Some(12),
+            binary_version_id: Some(45),
             preprocessor_id: None,
         };
 
@@ -924,9 +921,9 @@ mod request_tests {
             serde_json::to_value(&req).unwrap(),
             json!({
                 "action": "downloadBinary",
-                "token": "tok123",
+                "token": "GHhgdf(/&",
                 "type": "cracker",
-                "binaryVersionId": 12
+                "binaryVersionId": 45
             })
         );
     }
@@ -934,7 +931,7 @@ mod request_tests {
     #[test]
     fn download_binary_util_omits_optional_ids() {
         let req = Request::DownloadBinary {
-            token: "tok123".to_string(),
+            token: "GHhgdf(/&".to_string(),
             binary_type: BinaryType::Extractor.into(),
             binary_version_id: None,
             preprocessor_id: None,
@@ -942,50 +939,50 @@ mod request_tests {
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
-            json!({"action": "downloadBinary", "token": "tok123", "type": "7zr"})
+            json!({"action": "downloadBinary", "token": "GHhgdf(/&", "type": "7zr"})
         );
     }
 
     #[test]
     fn get_task() {
         let req = Request::GetTask {
-            token: "tok123".to_string(),
+            token: "GHhgdf(/&".to_string(),
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
-            json!({"action": "getTask", "token": "tok123"})
+            json!({"action": "getTask", "token": "GHhgdf(/&"})
         );
     }
 
     #[test]
     fn get_chunk() {
         let req = Request::GetChunk {
-            token: "tok123".to_string(),
-            task_id: 42,
+            token: "GHhgdf(/&".to_string(),
+            task_id: 5,
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
-            json!({"action": "getChunk", "token": "tok123", "taskId": 42})
+            json!({"action": "getChunk", "token": "GHhgdf(/&", "taskId": 5})
         );
     }
 
     #[test]
     fn send_keyspace() {
         let req = Request::SendKeyspace {
-            token: "tok123".to_string(),
-            task_id: 42,
-            keyspace: 14344385,
+            token: "GHhgdf(/&".to_string(),
+            task_id: 35,
+            keyspace: 568000,
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
             json!({
                 "action": "sendKeyspace",
-                "token": "tok123",
-                "taskId": 42,
-                "keyspace": 14344385
+                "token": "GHhgdf(/&",
+                "taskId": 35,
+                "keyspace": 568000
             })
         );
     }
@@ -993,20 +990,20 @@ mod request_tests {
     #[test]
     fn send_benchmark() {
         let req = Request::SendBenchmark {
-            token: "tok123".to_string(),
-            task_id: 42,
+            token: "GHhgdf(/&".to_string(),
+            task_id: 35,
             bench_type: BenchmarkType::Speed.into(),
-            result: "3320.1".to_string(),
+            result: "674:674.74".to_string(),
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
             json!({
                 "action": "sendBenchmark",
-                "token": "tok123",
-                "taskId": 42,
+                "token": "GHhgdf(/&",
+                "taskId": 35,
                 "type": "speed",
-                "result": "3320.1"
+                "result": "674:674.74"
             })
         );
     }
@@ -1014,13 +1011,26 @@ mod request_tests {
     #[test]
     fn send_progress_omits_optional_telemetry() {
         let req = Request::SendProgress {
-            token: "tok123".to_string(),
-            chunk_id: 100,
-            keyspace_progress: 500,
-            relative_progress: 5000,
-            speed: 123456,
-            state: 4,
-            cracks: vec!["5f4dcc3b5aa765d61d8327deb882cf99:password".to_string()],
+            token: "GHhgdf(/&".to_string(),
+            chunk_id: 35,
+            keyspace_progress: 568000,
+            relative_progress: 4545,
+            speed: 570000,
+            state: 3,
+            cracks: vec![
+                vec![
+                    "7fde65673fd28736423f23423786f".to_string(),
+                    "thisisplain".to_string(),
+                    "746869736973706c61696e".to_string(),
+                    "787523889".to_string(),
+                ],
+                vec![
+                    "7fde65673f28987f7423f2342378f".to_string(),
+                    "otherplain".to_string(),
+                    "6f74686572706c61696e".to_string(),
+                    "78652".to_string(),
+                ],
+            ],
             debug_output: None,
             gpu_temp: None,
             gpu_util: None,
@@ -1031,13 +1041,16 @@ mod request_tests {
             serde_json::to_value(&req).unwrap(),
             json!({
                 "action": "sendProgress",
-                "token": "tok123",
-                "chunkId": 100,
-                "keyspaceProgress": 500,
-                "relativeProgress": 5000,
-                "speed": 123456,
-                "state": 4,
-                "cracks": ["5f4dcc3b5aa765d61d8327deb882cf99:password"]
+                "token": "GHhgdf(/&",
+                "chunkId": 35,
+                "keyspaceProgress": 568000,
+                "relativeProgress": 4545,
+                "speed": 570000,
+                "state": 3,
+                "cracks": [
+                    ["7fde65673fd28736423f23423786f", "thisisplain", "746869736973706c61696e", "787523889"],
+                    ["7fde65673f28987f7423f2342378f", "otherplain", "6f74686572706c61696e", "78652"]
+                ]
             })
         );
     }
@@ -1045,42 +1058,42 @@ mod request_tests {
     #[test]
     fn send_progress_includes_telemetry_when_present() {
         let req = Request::SendProgress {
-            token: "tok123".to_string(),
-            chunk_id: 100,
-            keyspace_progress: 500,
-            relative_progress: 5000,
-            speed: 123456,
-            state: 4,
+            token: "GHhgdf(/&".to_string(),
+            chunk_id: 35,
+            keyspace_progress: 568000,
+            relative_progress: 4545,
+            speed: 570000,
+            state: 3,
             cracks: vec![],
             debug_output: Some(vec!["oops".to_string()]),
-            gpu_temp: Some(vec![55, 60]),
-            gpu_util: Some(vec![98, 99]),
+            gpu_temp: Some(vec![67]),
+            gpu_util: Some(vec![99]),
             cpu_util: Some(vec![12.5]),
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["debugOutput"], json!(["oops"]));
-        assert_eq!(v["gpuTemp"], json!([55, 60]));
-        assert_eq!(v["gpuUtil"], json!([98, 99]));
+        assert_eq!(v["gpuTemp"], json!([67]));
+        assert_eq!(v["gpuUtil"], json!([99]));
         assert_eq!(v["cpuUtil"], json!([12.5]));
     }
 
     #[test]
     fn client_error_keeps_null_chunk_id() {
         let req = Request::ClientError {
-            token: "tok123".to_string(),
-            task_id: 42,
+            token: "GHhgdf(/&".to_string(),
+            task_id: 45,
             chunk_id: None,
-            message: "hashcat exited with code 1".to_string(),
+            message: "This is a sample error message!".to_string(),
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
             json!({
                 "action": "clientError",
-                "token": "tok123",
-                "taskId": 42,
+                "token": "GHhgdf(/&",
+                "taskId": 45,
                 "chunkId": null,
-                "message": "hashcat exited with code 1"
+                "message": "This is a sample error message!"
             })
         );
     }
@@ -1088,46 +1101,46 @@ mod request_tests {
     #[test]
     fn client_error_with_chunk_id() {
         let req = Request::ClientError {
-            token: "tok123".to_string(),
-            task_id: 42,
-            chunk_id: Some(7),
-            message: "boom".to_string(),
+            token: "GHhgdf(/&".to_string(),
+            task_id: 45,
+            chunk_id: Some(1),
+            message: "This is a sample error message!".to_string(),
         };
 
-        assert_eq!(serde_json::to_value(&req).unwrap()["chunkId"], json!(7));
+        assert_eq!(serde_json::to_value(&req).unwrap()["chunkId"], json!(1));
     }
 
     #[test]
     fn get_hashlist() {
         let req = Request::GetHashlist {
-            token: "tok123".to_string(),
-            hashlist_id: 7,
+            token: "GHhgdf(/&".to_string(),
+            hashlist_id: 23,
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
-            json!({"action": "getHashlist", "token": "tok123", "hashlistId": 7})
+            json!({"action": "getHashlist", "token": "GHhgdf(/&", "hashlistId": 23})
         );
     }
 
     #[test]
     fn get_found() {
         let req = Request::GetFound {
-            token: "tok123".to_string(),
+            token: "GHhgdf(/&".to_string(),
             hashlist_id: 7,
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
-            json!({"action": "getFound", "token": "tok123", "hashlistId": 7})
+            json!({"action": "getFound", "token": "GHhgdf(/&", "hashlistId": 7})
         );
     }
 
     #[test]
     fn get_file() {
         let req = Request::GetFile {
-            token: "tok123".to_string(),
-            task_id: 42,
+            token: "GHhgdf(/&".to_string(),
+            task_id: 56,
             file: "rockyou.txt".to_string(),
         };
 
@@ -1135,8 +1148,8 @@ mod request_tests {
             serde_json::to_value(&req).unwrap(),
             json!({
                 "action": "getFile",
-                "token": "tok123",
-                "taskId": 42,
+                "token": "GHhgdf(/&",
+                "taskId": 56,
                 "file": "rockyou.txt"
             })
         );
@@ -1145,50 +1158,56 @@ mod request_tests {
     #[test]
     fn get_file_status() {
         let req = Request::GetFileStatus {
-            token: "tok123".to_string(),
+            token: "GHhgdf(/&".to_string(),
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
-            json!({"action": "getFileStatus", "token": "tok123"})
+            json!({"action": "getFileStatus", "token": "GHhgdf(/&"})
         );
     }
 
     #[test]
     fn get_health_check() {
         let req = Request::GetHealthCheck {
-            token: "tok123".to_string(),
+            token: "GHhgdf(/&".to_string(),
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
-            json!({"action": "getHealthCheck", "token": "tok123"})
+            json!({"action": "getHealthCheck", "token": "GHhgdf(/&"})
         );
     }
 
     #[test]
     fn send_health_check() {
         let req = Request::SendHealthCheck {
-            token: "tok123".to_string(),
-            check_id: 9,
-            num_cracked: 2,
-            start: 1700000000,
-            end: 1700000123,
-            num_gpus: 4,
-            errors: vec![],
+            token: "GHhgdf(/&".to_string(),
+            check_id: 7,
+            num_cracked: 23,
+            start: 1536306884,
+            end: 1536306902,
+            num_gpus: 1,
+            errors: vec![
+                "nvmlDeviceGetTemperatureThreshold(): Not Supported".to_string(),
+                "nvmlDeviceGetTemperatureThreshold(): Not Supported".to_string(),
+            ],
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
             json!({
                 "action": "sendHealthCheck",
-                "token": "tok123",
-                "checkId": 9,
-                "numCracked": 2,
-                "start": 1700000000,
-                "end": 1700000123,
-                "numGpus": 4,
-                "errors": []
+                "token": "GHhgdf(/&",
+                "checkId": 7,
+                "numCracked": 23,
+                "start": 1536306884,
+                "end": 1536306902,
+                "numGpus": 1,
+                "errors": [
+                    "nvmlDeviceGetTemperatureThreshold(): Not Supported",
+                    "nvmlDeviceGetTemperatureThreshold(): Not Supported"
+                ]
             })
         );
     }
@@ -1196,12 +1215,12 @@ mod request_tests {
     #[test]
     fn deregister() {
         let req = Request::Deregister {
-            token: "tok123".to_string(),
+            token: "GHhgdf(/&".to_string(),
         };
 
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
-            json!({"action": "deregister", "token": "tok123"})
+            json!({"action": "deregister", "token": "GHhgdf(/&"})
         );
     }
 }
@@ -1246,10 +1265,10 @@ mod response_tests {
         let res: RegisterResponse = decode::<raw::RegisterResponse, _>(json!({
             "action": "register",
             "response": "SUCCESS",
-            "token": "abc123"
+            "token": "GHhgdf(/&"
         }));
 
-        assert_eq!(res.token, "abc123");
+        assert_eq!(res.token, "GHhgdf(/&");
     }
 
     #[test]
@@ -1331,13 +1350,13 @@ mod response_tests {
             "action": "checkClientVersion",
             "response": "SUCCESS",
             "version": "NEW",
-            "url": "https://server/agents.php?download=3"
+            "url": "https://example.com/getclient.php"
         }));
 
         assert_eq!(
             res,
             CheckClientVersionResponse::NewVersion {
-                url: "https://server/agents.php?download=3".to_string()
+                url: "https://example.com/getclient.php".to_string()
             }
         );
     }
@@ -1359,13 +1378,13 @@ mod response_tests {
         let res: DownloadBinaryResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
             "action": "downloadBinary",
             "response": "SUCCESS",
-            "executable": "https://server/static/7zr"
+            "executable": "https://example.com/getapp.php"
         }));
 
         assert_eq!(
             res,
             DownloadBinaryResponse::Utility {
-                url: "https://server/static/7zr".to_string()
+                url: "https://example.com/getapp.php".to_string()
             }
         );
     }
@@ -1375,17 +1394,17 @@ mod response_tests {
         let res: DownloadBinaryResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
             "action": "downloadBinary",
             "response": "SUCCESS",
-            "url": "https://server/files/hashcat.7z",
-            "name": "hashcat",
-            "executable": "hashcat.bin"
+            "url": "https://hashcat.net/files/hashcat-3.01.7z",
+            "name": "Hashcat",
+            "executable": "hashcat64.bin"
         }));
 
         assert_eq!(
             res,
             DownloadBinaryResponse::Archive {
-                url: "https://server/files/hashcat.7z".to_string(),
-                name: "hashcat".to_string(),
-                binary: "hashcat.bin".to_string()
+                url: "https://hashcat.net/files/hashcat-3.01.7z".to_string(),
+                name: "Hashcat".to_string(),
+                binary: "hashcat64.bin".to_string()
             }
         );
     }
@@ -1395,9 +1414,9 @@ mod response_tests {
         let res: DownloadBinaryResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
             "action": "downloadBinary",
             "response": "SUCCESS",
-            "url": "https://server/files/princeprocessor.7z",
-            "name": "princeprocessor",
-            "executable": "pp64.bin",
+            "url": "https://github.com/hashcat/princeprocessor/releases/download/v0.22/princeprocessor-0.22.7z",
+            "name": "Prince",
+            "executable": "pp.bin",
             "keyspaceCommand": "--keyspace",
             "skipCommand": "--skip",
             "limitCommand": "--limit"
@@ -1406,9 +1425,9 @@ mod response_tests {
         assert_eq!(
             res,
             DownloadBinaryResponse::Preprocessor {
-                url: "https://server/files/princeprocessor.7z".to_string(),
-                name: "princeprocessor".to_string(),
-                binary: "pp64.bin".to_string(),
+                url: "https://github.com/hashcat/princeprocessor/releases/download/v0.22/princeprocessor-0.22.7z".to_string(),
+                name: "Prince".to_string(),
+                binary: "pp.bin".to_string(),
                 keyspace_command: "--keyspace".to_string(),
                 skip_command: "--skip".to_string(),
                 limit_command: "--limit".to_string()
@@ -1422,13 +1441,13 @@ mod response_tests {
             "action": "getTask",
             "response": "SUCCESS",
             "taskId": null,
-            "reason": "No suitable task available!"
+            "reason": "No task available!"
         }));
 
         assert_eq!(
             res,
             GetTaskResponse::NoTask {
-                reason: Some("No suitable task available!".to_string())
+                reason: Some("No task available!".to_string())
             }
         );
     }
@@ -1449,35 +1468,38 @@ mod response_tests {
         let res: GetTaskResponse = decode::<raw::GetTaskResponse, _>(json!({
             "action": "getTask",
             "response": "SUCCESS",
-            "taskId": 42,
-            "crackerId": 3,
-            "attackcmd": "#HL# -a 0 wordlist",
+            "taskId": 25,
+            "crackerId": 45,
+            "attackcmd": "#HL# -a 3 ?a?a?a?a --hash-type=0",
             "cmdpars": " --hash-type=0 ",
-            "hashlistId": 7,
+            "hashlistId": 13,
             "bench": 30,
             "statustimer": 5,
-            "files": ["wordlist"],
+            "files": ["rockyou.txt", "wordlist.txt"],
             "benchType": "speed",
             "hashlistAlias": "#HL#",
-            "keyspace": 14344385,
+            "keyspace": 0,
             "usePreprocessor": false,
             "preprocessor": null,
             "preprocessorCommand": null,
             "enforcePipe": false,
-            "slowHash": true,
+            "slowHash": false,
             "useBrain": false
         }));
 
         let GetTaskResponse::Task(task) = res else {
             panic!("expected a task assignment, got {res:?}");
         };
-        assert_eq!(task.task_id, 42);
-        assert_eq!(task.cracker_id, 3);
-        assert_eq!(task.attack_command, "#HL# -a 0 wordlist");
+        assert_eq!(task.task_id, 25);
+        assert_eq!(task.cracker_id, 45);
+        assert_eq!(task.attack_command, "#HL# -a 3 ?a?a?a?a --hash-type=0");
         assert_eq!(task.bench_type, BenchmarkType::Speed);
-        assert_eq!(task.keyspace, 14344385);
-        assert_eq!(task.files, vec!["wordlist".to_string()]);
-        assert!(task.slow_hash);
+        assert_eq!(task.keyspace, 0);
+        assert_eq!(
+            task.files,
+            vec!["rockyou.txt".to_string(), "wordlist.txt".to_string()]
+        );
+        assert!(!task.slow_hash);
         assert!(task.preprocessor.is_none());
         assert!(task.brain.is_none());
     }
@@ -1487,26 +1509,26 @@ mod response_tests {
         let res: GetTaskResponse = decode::<raw::GetTaskResponse, _>(json!({
             "action": "getTask",
             "response": "SUCCESS",
-            "taskId": 1,
-            "crackerId": 3,
-            "attackcmd": "#HL#",
-            "cmdpars": "",
-            "hashlistId": 7,
+            "taskId": 25,
+            "crackerId": 45,
+            "attackcmd": "#HL# -a 3 ?a?a?a?a --hash-type=0",
+            "cmdpars": " --hash-type=0 ",
+            "hashlistId": 13,
             "bench": 30,
             "statustimer": 5,
-            "files": [],
-            "benchType": "run",
+            "files": ["rockyou.txt", "wordlist.txt"],
+            "benchType": "speed",
             "hashlistAlias": "#HL#",
-            "keyspace": 100,
+            "keyspace": 0,
             "enforcePipe": false,
             "slowHash": false,
             "usePreprocessor": true,
-            "preprocessor": 5,
-            "preprocessorCommand": "-c",
+            "preprocessor": 2,
+            "preprocessorCommand": "wordlist.txt",
             "useBrain": true,
-            "brainHost": "10.0.0.1",
-            "brainPort": 13743,
-            "brainPass": "secret",
+            "brainHost": "10.20.30.40",
+            "brainPort": 1234,
+            "brainPass": "password",
             "brainFeatures": 3
         }));
 
@@ -1516,16 +1538,16 @@ mod response_tests {
         assert_eq!(
             task.preprocessor,
             Some(Preprocessor {
-                id: 5,
-                command: "-c".to_string()
+                id: 2,
+                command: "wordlist.txt".to_string()
             })
         );
         assert_eq!(
             task.brain,
             Some(BrainConfig {
-                host: "10.0.0.1".to_string(),
-                port: 13743,
-                pass: "secret".to_string(),
+                host: "10.20.30.40".to_string(),
+                port: 1234,
+                pass: "password".to_string(),
                 features: 3
             })
         );
@@ -1563,17 +1585,17 @@ mod response_tests {
             "action": "getChunk",
             "response": "SUCCESS",
             "status": "OK",
-            "chunkId": 100,
-            "skip": 0,
-            "length": 5000
+            "chunkId": 13,
+            "skip": 45000,
+            "length": 10000
         }));
 
         assert_eq!(
             res,
             GetChunkResponse::Chunk(Chunk {
-                id: 100,
-                skip: 0,
-                length: 5000
+                id: 13,
+                skip: 45000,
+                length: 10000
             })
         );
     }
@@ -1646,7 +1668,7 @@ mod response_tests {
             "response": "SUCCESS",
             "cracked": 2,
             "skipped": 0,
-            "zaps": ["hashA", "hashB"]
+            "zaps": ["87634876fe7f7df5e76f56a757", "7863487563874ffefe67575745"]
         }))
         .unwrap();
 
@@ -1655,7 +1677,10 @@ mod response_tests {
             SendProgressResponse::Continue {
                 cracked: 2,
                 skipped: 0,
-                zaps: vec!["hashA".to_string(), "hashB".to_string()]
+                zaps: vec![
+                    "87634876fe7f7df5e76f56a757".to_string(),
+                    "7863487563874ffefe67575745".to_string()
+                ]
             }
         );
     }
@@ -1684,15 +1709,15 @@ mod response_tests {
             "action": "getFile",
             "response": "SUCCESS",
             "filename": "rockyou.txt",
-            "extension": "txt",
-            "url": "getFile.php?file=1",
-            "filesize": 139921497
+            "extension": ".txt",
+            "url": "get.php?file=5&token=GHhgdf(/&",
+            "filesize": 267729
         }));
 
         assert_eq!(res.filename, "rockyou.txt");
-        assert_eq!(res.extension, "txt");
-        assert_eq!(res.url, "getFile.php?file=1");
-        assert_eq!(res.filesize, 139921497);
+        assert_eq!(res.extension, ".txt");
+        assert_eq!(res.url, "get.php?file=5&token=GHhgdf(/&");
+        assert_eq!(res.filesize, 267729);
     }
 
     #[test]
@@ -1733,10 +1758,10 @@ mod response_tests {
         let res: GetHashlistResponse = decode::<raw::GetHashlistResponse, _>(json!({
             "action": "getHashlist",
             "response": "SUCCESS",
-            "url": "getHashlist.php?hashlist=7"
+            "url": "get.php?hashlist=5&token=GHhgdf(/&"
         }));
 
-        assert_eq!(res.url, "getHashlist.php?hashlist=7");
+        assert_eq!(res.url, "get.php?hashlist=5&token=GHhgdf(/&");
     }
 
     #[test]
@@ -1755,17 +1780,23 @@ mod response_tests {
         let res: GetHealthCheckResponse = decode::<raw::GetHealthCheckResponse, _>(json!({
             "action": "getHealthCheck",
             "response": "SUCCESS",
-            "attack": " --hash-type=0 #HL# -a 3 ?a?a?a",
-            "crackerBinaryId": 3,
-            "hashes": ["hash1", "hash2"],
-            "checkId": 9,
+            "attack": "#HL# -a 3 -1 ?l?u?d ?1?1?1?1?1",
+            "crackerBinaryId": 1,
+            "hashes": ["9f650d4ef70eead895e7a03ce0f83e88", "24a7bdfd14bca7f9d14154c0800a833d"],
+            "checkId": 7,
             "hashlistAlias": "#HL#"
         }));
 
-        assert_eq!(res.attack, " --hash-type=0 #HL# -a 3 ?a?a?a");
-        assert_eq!(res.cracker_binary_id, 3);
-        assert_eq!(res.hashes, vec!["hash1".to_string(), "hash2".to_string()]);
-        assert_eq!(res.check_id, 9);
+        assert_eq!(res.attack, "#HL# -a 3 -1 ?l?u?d ?1?1?1?1?1");
+        assert_eq!(res.cracker_binary_id, 1);
+        assert_eq!(
+            res.hashes,
+            vec![
+                "9f650d4ef70eead895e7a03ce0f83e88".to_string(),
+                "24a7bdfd14bca7f9d14154c0800a833d".to_string()
+            ]
+        );
+        assert_eq!(res.check_id, 7);
         assert_eq!(res.hashlist_alias, "#HL#");
     }
 
