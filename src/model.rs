@@ -165,6 +165,20 @@ pub enum GetChunkResponse {
     HealthCheck,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ProgressReport {
+    pub chunk_id: u64,
+    pub keyspace_progress: u64,
+    pub relative_progress: u64,
+    pub speed: u64,
+    pub state: u32,
+    pub cracks: Vec<String>,
+    pub debug_output: Option<Vec<String>>,
+    pub gpu_temp: Option<Vec<i64>>,
+    pub gpu_util: Option<Vec<i64>>,
+    pub cpu_util: Option<Vec<f64>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendProgressResponse {
     Continue {

@@ -5,9 +5,9 @@ use serde_json::Value;
 
 use crate::model::{
     AckResponse, BenchmarkType, BinaryType, CheckClientVersionResponse, DownloadBinaryResponse,
-    GetChunkResponse, GetFileResponse, GetFileStatusResponse, GetFoundResponse, GetHashlistResponse,
-    GetHealthCheckResponse, GetTaskResponse, LoginResponse, Os, RegisterResponse,
-    SendProgressResponse,
+    GetChunkResponse, GetFileResponse, GetFileStatusResponse, GetFoundResponse,
+    GetHashlistResponse, GetHealthCheckResponse, GetTaskResponse, LoginResponse, Os,
+    ProgressReport, RegisterResponse, SendProgressResponse,
 };
 use crate::protocol::{ProtocolError, Request, raw};
 use crate::transport::{Transport, TransportError};
@@ -66,20 +66,6 @@ impl From<ProtocolError> for ClientError {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ProgressReport {
-    pub chunk_id: u64,
-    pub keyspace_progress: u64,
-    pub relative_progress: u64,
-    pub speed: u64,
-    pub state: u32,
-    pub cracks: Vec<String>,
-    pub debug_output: Option<Vec<String>>,
-    pub gpu_temp: Option<Vec<i64>>,
-    pub gpu_util: Option<Vec<i64>>,
-    pub cpu_util: Option<Vec<f64>>,
-}
-
 #[derive(Debug, Clone)]
 pub struct Client<T: Transport> {
     transport: T,
@@ -113,32 +99,9 @@ impl<T: Transport> Client<T> {
         &self.transport
     }
 
-    fn token_owned(&self) -> String {
-        self.token.clone()
-    }
-
-    async fn call<R: DeserializeOwned>(
-        &self,
-        action: &'static str,
-        request: Request,
-    ) -> Result<R, ClientError> {
-        let body = serde_json::to_value(&request)?;
-        let value = self.transport.post_json(&body).await?;
-        check_success(&value, action)?;
-        Ok(serde_json::from_value(value)?)
-    }
-
-    async fn call_ack(
-        &self,
-        action: &'static str,
-        request: Request,
-    ) -> Result<AckResponse, ClientError> {
-        let raw: raw::AckResponse = self.call(action, request).await?;
-        Ok(raw.into())
-    }
-
     pub async fn test_connection(&self) -> Result<AckResponse, ClientError> {
-        self.call_ack("testConnection", Request::TestConnection).await
+        self.call_ack("testConnection", Request::TestConnection)
+            .await
     }
 
     pub async fn register(
@@ -411,7 +374,7 @@ impl<T: Transport> Client<T> {
         num_gpus: u32,
         errors: Vec<String>,
     ) -> Result<AckResponse, ClientError> {
-        self.call_ack(
+        self.call_ack_expecting(
             "sendHealthCheck",
             Request::SendHealthCheck {
                 token: self.token_owned(),
@@ -422,6 +385,7 @@ impl<T: Transport> Client<T> {
                 num_gpus,
                 errors,
             },
+            raw::Status::Ok,
         )
         .await
     }
@@ -435,11 +399,67 @@ impl<T: Transport> Client<T> {
         )
         .await
     }
+
+    fn token_owned(&self) -> String {
+        self.token.clone()
+    }
+
+    async fn call<R: DeserializeOwned>(
+        &self,
+        action: &'static str,
+        request: Request,
+    ) -> Result<R, ClientError> {
+        self.call_expecting(action, request, raw::Status::Success)
+            .await
+    }
+
+    /// Like [`Client::call`] but gated on a caller-supplied success token.
+    /// Every action answers with "SUCCESS" except `sendHealthCheck`, which the
+    /// server answers with "OK" (see `APISendHealthCheck` server-side).
+    async fn call_expecting<R: DeserializeOwned>(
+        &self,
+        action: &'static str,
+        request: Request,
+        expected_status: raw::Status,
+    ) -> Result<R, ClientError> {
+        let body = serde_json::to_value(&request)?;
+        let value = self.transport.post_json(&body).await?;
+        check_status(&value, action, expected_status)?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    async fn call_ack(
+        &self,
+        action: &'static str,
+        request: Request,
+    ) -> Result<AckResponse, ClientError> {
+        self.call_ack_expecting(action, request, raw::Status::Success)
+            .await
+    }
+
+    async fn call_ack_expecting(
+        &self,
+        action: &'static str,
+        request: Request,
+        expected_status: raw::Status,
+    ) -> Result<AckResponse, ClientError> {
+        let raw: raw::AckResponse = self
+            .call_expecting(action, request, expected_status)
+            .await?;
+        Ok(raw.into())
+    }
 }
 
-fn check_success(value: &Value, action: &'static str) -> Result<(), ClientError> {
-    match value.get("response").and_then(Value::as_str) {
-        Some("SUCCESS") => Ok(()),
+fn check_status(
+    value: &Value,
+    action: &'static str,
+    expected_status: raw::Status,
+) -> Result<(), ClientError> {
+    let status = value
+        .get("response")
+        .and_then(|response| serde_json::from_value::<raw::Status>(response.clone()).ok());
+    match status {
+        Some(status) if status == expected_status => Ok(()),
         _ => Err(ClientError::Server {
             action,
             message: value

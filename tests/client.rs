@@ -1,11 +1,11 @@
 mod support;
 
-use htp_agent::client::{Client, ClientError, ProgressReport};
+use htp_agent::client::{Client, ClientError};
 use htp_agent::model::{
     BenchmarkType, BinaryType, BrainConfig, CheckClientVersionResponse, Chunk,
     DownloadBinaryResponse, GetChunkResponse, GetFileResponse, GetFileStatusResponse,
     GetFoundResponse, GetHashlistResponse, GetHealthCheckResponse, GetTaskResponse, LoginResponse,
-    Os, Preprocessor, RegisterResponse, SendProgressResponse, TaskAssignment,
+    Os, Preprocessor, ProgressReport, RegisterResponse, SendProgressResponse, TaskAssignment,
 };
 use htp_agent::protocol::ProtocolError;
 use htp_agent::transport::TransportError;
@@ -765,8 +765,9 @@ async fn get_health_check_error() {
 }
 
 #[tokio::test]
-async fn send_health_check_returns_ack() {
-    let client = mock_client_returning(json!({"action": "sendHealthCheck", "response": "SUCCESS"}));
+async fn send_health_check_accepts_ok_response() {
+    // sendHealthCheck is the one action the server answers with "OK".
+    let client = mock_client_returning(json!({"action": "sendHealthCheck", "response": "OK"}));
 
     let res = client
         .send_health_check(9, 5, 100, 200, 2, vec!["e".to_string()])
@@ -797,6 +798,17 @@ async fn send_health_check_error() {
         client.send_health_check(9, 5, 100, 200, 2, vec![]).await,
         "sendHealthCheck",
     );
+}
+
+#[tokio::test]
+async fn send_health_check_rejects_generic_success() {
+    // This endpoint expects "OK" specifically; a stray "SUCCESS" is an error.
+    let client = mock_client_returning(json!({"action": "sendHealthCheck", "response": "SUCCESS"}));
+
+    match client.send_health_check(9, 5, 100, 200, 2, vec![]).await {
+        Err(ClientError::Server { action, .. }) => assert_eq!(action, "sendHealthCheck"),
+        other => panic!("expected server error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
