@@ -129,7 +129,7 @@ async fn update_information_returns_ack() {
         .update_information(
             "230-34-345-345",
             Os::Linux,
-            vec!["ATI HD7970".to_string(), "ATI HD7970".to_string()],
+            &["ATI HD7970", "ATI HD7970"],
         )
         .await
         .unwrap();
@@ -153,7 +153,7 @@ async fn update_information_error() {
 
     assert_server_error(
         client
-            .update_information("230-34-345-345", Os::Linux, vec![])
+            .update_information("230-34-345-345", Os::Linux, &[] as &[&str])
             .await,
         "updateInformation",
     );
@@ -826,9 +826,9 @@ async fn send_health_check_accepts_ok_response() {
             1536306884,
             1536306902,
             1,
-            vec![
-                "nvmlDeviceGetTemperatureThreshold(): Not Supported".to_string(),
-                "nvmlDeviceGetTemperatureThreshold(): Not Supported".to_string(),
+            &[
+                "nvmlDeviceGetTemperatureThreshold(): Not Supported",
+                "nvmlDeviceGetTemperatureThreshold(): Not Supported",
             ],
         )
         .await
@@ -859,7 +859,7 @@ async fn send_health_check_error() {
 
     assert_server_error(
         client
-            .send_health_check(7, 23, 1536306884, 1536306902, 1, vec![])
+            .send_health_check(7, 23, 1536306884, 1536306902, 1, &[] as &[&str])
             .await,
         "sendHealthCheck",
     );
@@ -871,7 +871,7 @@ async fn send_health_check_rejects_generic_success() {
     let client = mock_client_returning(json!({"action": "sendHealthCheck", "response": "SUCCESS"}));
 
     match client
-        .send_health_check(7, 23, 1536306884, 1536306902, 1, vec![])
+        .send_health_check(7, 23, 1536306884, 1536306902, 1, &[] as &[&str])
         .await
     {
         Err(ClientError::Server { action, .. }) => assert_eq!(action, "sendHealthCheck"),

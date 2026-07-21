@@ -143,7 +143,7 @@ impl<T: Transport> Client<T> {
         &self,
         uid: impl Into<String>,
         os: Os,
-        devices: Vec<String>,
+        devices: &[impl AsRef<str>],
     ) -> Result<AckResponse, ClientError> {
         self.call_ack(
             "updateInformation",
@@ -151,7 +151,7 @@ impl<T: Transport> Client<T> {
                 token: self.token_owned(),
                 uid: uid.into(),
                 os: os.into(),
-                devices,
+                devices: to_string_vec(devices),
             },
         )
         .await
@@ -372,7 +372,7 @@ impl<T: Transport> Client<T> {
         start: i64,
         end: i64,
         num_gpus: u32,
-        errors: Vec<String>,
+        errors: &[impl AsRef<str>],
     ) -> Result<AckResponse, ClientError> {
         self.call_ack_expecting(
             "sendHealthCheck",
@@ -383,7 +383,7 @@ impl<T: Transport> Client<T> {
                 start,
                 end,
                 num_gpus,
-                errors,
+                errors: to_string_vec(errors),
             },
             raw::Status::Ok,
         )
@@ -448,6 +448,10 @@ impl<T: Transport> Client<T> {
             .await?;
         Ok(raw.into())
     }
+}
+
+fn to_string_vec(items: &[impl AsRef<str>]) -> Vec<String> {
+    items.iter().map(|s| s.as_ref().to_owned()).collect()
 }
 
 fn check_status(
