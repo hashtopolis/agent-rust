@@ -2,10 +2,11 @@ mod support;
 
 use htp_agent::client::{Client, ClientError};
 use htp_agent::model::{
-    BenchmarkType, BinaryType, BrainConfig, CheckClientVersionResponse, Chunk,
-    DownloadBinaryResponse, GetChunkResponse, GetFileResponse, GetFileStatusResponse,
-    GetFoundResponse, GetHashlistResponse, GetHealthCheckResponse, GetTaskResponse, LoginResponse,
-    Os, Preprocessor, ProgressReport, RegisterResponse, SendProgressResponse, TaskAssignment,
+    BenchmarkType, BrainConfig, CheckClientVersionResponse, Chunk, DownloadCrackerResponse,
+    DownloadPreprocessorResponse, DownloadUtilityResponse, GetChunkResponse, GetFileResponse,
+    GetFileStatusResponse, GetFoundResponse, GetHashlistResponse, GetHealthCheckResponse,
+    GetTaskResponse, LoginResponse, Os, Preprocessor, ProgressReport, RegisterResponse,
+    SendProgressResponse, TaskAssignment,
 };
 use htp_agent::protocol::ProtocolError;
 use htp_agent::transport::TransportError;
@@ -126,11 +127,7 @@ async fn update_information_returns_ack() {
         mock_client_returning(json!({"action": "updateInformation", "response": "SUCCESS"}));
 
     let res = client
-        .update_information(
-            "230-34-345-345",
-            Os::Linux,
-            &["ATI HD7970", "ATI HD7970"],
-        )
+        .update_information("230-34-345-345", Os::Linux, &["ATI HD7970", "ATI HD7970"])
         .await
         .unwrap();
 
@@ -212,7 +209,7 @@ async fn check_client_version_error() {
 }
 
 #[tokio::test]
-async fn download_binary_returns_archive() {
+async fn download_cracker_returns_archive() {
     let client = mock_client_returning(json!({
         "action": "downloadBinary",
         "response": "SUCCESS",
@@ -221,14 +218,11 @@ async fn download_binary_returns_archive() {
         "executable": "hashcat64.bin"
     }));
 
-    let res = client
-        .download_binary(BinaryType::Cracker, Some(45), None)
-        .await
-        .unwrap();
+    let res = client.download_cracker(45).await.unwrap();
 
     assert_eq!(
         res,
-        DownloadBinaryResponse::Archive {
+        DownloadCrackerResponse {
             url: "https://hashcat.net/files/hashcat-3.01.7z".to_string(),
             name: "Hashcat".to_string(),
             binary: "hashcat64.bin".to_string()
@@ -241,28 +235,29 @@ async fn download_binary_returns_archive() {
 }
 
 #[tokio::test]
-async fn download_binary_returns_utility() {
+async fn download_extractor_returns_utility() {
     let client = mock_client_returning(json!({
         "action": "downloadBinary",
         "response": "SUCCESS",
         "executable": "https://example.com/getapp.php"
     }));
 
-    let res = client
-        .download_binary(BinaryType::Extractor, None, None)
-        .await
-        .unwrap();
+    let res = client.download_extractor().await.unwrap();
 
     assert_eq!(
         res,
-        DownloadBinaryResponse::Utility {
+        DownloadUtilityResponse {
             url: "https://example.com/getapp.php".to_string()
         }
+    );
+    assert_client_sent_body(
+        &client,
+        json!({"action": "downloadBinary", "token": TOKEN, "type": "7zr"}),
     );
 }
 
 #[tokio::test]
-async fn download_binary_returns_preprocessor() {
+async fn download_preprocessor_returns_preprocessor() {
     let client = mock_client_returning(json!({
         "action": "downloadBinary",
         "response": "SUCCESS",
@@ -274,21 +269,22 @@ async fn download_binary_returns_preprocessor() {
         "limitCommand": "--limit"
     }));
 
-    let res = client
-        .download_binary(BinaryType::Preprocessor, None, Some(1))
-        .await
-        .unwrap();
+    let res = client.download_preprocessor(1).await.unwrap();
 
     assert_eq!(
         res,
-        DownloadBinaryResponse::Preprocessor {
+        DownloadPreprocessorResponse {
             url: "https://github.com/hashcat/princeprocessor/releases/download/v0.22/princeprocessor-0.22.7z".to_string(),
             name: "Prince".to_string(),
             binary: "pp.bin".to_string(),
-            keyspace_command: "--keyspace".to_string(),
-            skip_command: "--skip".to_string(),
-            limit_command: "--limit".to_string()
+            keyspace_command: Some("--keyspace".to_string()),
+            skip_command: Some("--skip".to_string()),
+            limit_command: Some("--limit".to_string())
         }
+    );
+    assert_client_sent_body(
+        &client,
+        json!({"action": "downloadBinary", "token": TOKEN, "type": "preprocessor", "preprocessorId": 1}),
     );
 }
 
@@ -296,12 +292,7 @@ async fn download_binary_returns_preprocessor() {
 async fn download_binary_error() {
     let client = mock_client_returning(error_reply("downloadBinary"));
 
-    assert_server_error(
-        client
-            .download_binary(BinaryType::Cracker, None, None)
-            .await,
-        "downloadBinary",
-    );
+    assert_server_error(client.download_cracker(45).await, "downloadBinary");
 }
 
 #[tokio::test]

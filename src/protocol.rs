@@ -80,31 +80,16 @@ impl From<BenchmarkType> for model::BenchmarkType {
     }
 }
 
-/// Wire mirror of [`model::BinaryType`]: serialized as the server's binary tag.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) enum BinaryType {
     #[serde(rename = "7zr")]
     Extractor,
     #[serde(rename = "cracker")]
     Cracker,
-    #[serde(rename = "prince")]
-    Prince,
     #[serde(rename = "uftpd")]
     Uftpd,
     #[serde(rename = "preprocessor")]
     Preprocessor,
-}
-
-impl From<model::BinaryType> for BinaryType {
-    fn from(binary: model::BinaryType) -> Self {
-        match binary {
-            model::BinaryType::Extractor => BinaryType::Extractor,
-            model::BinaryType::Cracker => BinaryType::Cracker,
-            model::BinaryType::Prince => BinaryType::Prince,
-            model::BinaryType::Uftpd => BinaryType::Uftpd,
-            model::BinaryType::Preprocessor => BinaryType::Preprocessor,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -564,34 +549,39 @@ impl TryFrom<raw::CheckClientVersionResponse> for model::CheckClientVersionRespo
     }
 }
 
-impl TryFrom<raw::DownloadBinaryResponse> for model::DownloadBinaryResponse {
+impl TryFrom<raw::DownloadBinaryResponse> for model::DownloadUtilityResponse {
     type Error = ProtocolError;
 
     fn try_from(raw: raw::DownloadBinaryResponse) -> Result<Self, Self::Error> {
-        if raw.keyspace_command.is_some()
-            || raw.skip_command.is_some()
-            || raw.limit_command.is_some()
-        {
-            return Ok(model::DownloadBinaryResponse::Preprocessor {
-                url: raw.url.require("url")?,
-                name: raw.name.require("name")?,
-                binary: raw.executable.require("executable")?,
-                keyspace_command: raw.keyspace_command.require("keyspaceCommand")?,
-                skip_command: raw.skip_command.require("skipCommand")?,
-                limit_command: raw.limit_command.require("limitCommand")?,
-            });
-        }
-
-        if let Some(url) = raw.url {
-            return Ok(model::DownloadBinaryResponse::Archive {
-                url,
-                name: raw.name.require("name")?,
-                binary: raw.executable.require("executable")?,
-            });
-        }
-
-        Ok(model::DownloadBinaryResponse::Utility {
+        Ok(model::DownloadUtilityResponse {
             url: raw.executable.require("executable")?,
+        })
+    }
+}
+
+impl TryFrom<raw::DownloadBinaryResponse> for model::DownloadCrackerResponse {
+    type Error = ProtocolError;
+
+    fn try_from(raw: raw::DownloadBinaryResponse) -> Result<Self, Self::Error> {
+        Ok(model::DownloadCrackerResponse {
+            url: raw.url.require("url")?,
+            name: raw.name.require("name")?,
+            binary: raw.executable.require("executable")?,
+        })
+    }
+}
+
+impl TryFrom<raw::DownloadBinaryResponse> for model::DownloadPreprocessorResponse {
+    type Error = ProtocolError;
+
+    fn try_from(raw: raw::DownloadBinaryResponse) -> Result<Self, Self::Error> {
+        Ok(model::DownloadPreprocessorResponse {
+            url: raw.url.require("url")?,
+            name: raw.name.require("name")?,
+            binary: raw.executable.require("executable")?,
+            keyspace_command: raw.keyspace_command,
+            skip_command: raw.skip_command,
+            limit_command: raw.limit_command,
         })
     }
 }
@@ -794,24 +784,20 @@ mod wire_tests {
     #[test]
     fn binary_type_wire_values() {
         for (binary, wire) in [
-            (model::BinaryType::Extractor, "7zr"),
-            (model::BinaryType::Cracker, "cracker"),
-            (model::BinaryType::Prince, "prince"),
-            (model::BinaryType::Uftpd, "uftpd"),
-            (model::BinaryType::Preprocessor, "preprocessor"),
+            (BinaryType::Extractor, "7zr"),
+            (BinaryType::Cracker, "cracker"),
+            (BinaryType::Uftpd, "uftpd"),
+            (BinaryType::Preprocessor, "preprocessor"),
         ] {
-            assert_eq!(
-                serde_json::to_value(BinaryType::from(binary)).unwrap(),
-                json!(wire)
-            );
+            assert_eq!(serde_json::to_value(binary).unwrap(), json!(wire));
         }
     }
 }
 
 #[cfg(test)]
 mod request_tests {
-    use super::Request;
-    use crate::model::{BenchmarkType, BinaryType, Os};
+    use super::{BinaryType, Request};
+    use crate::model::{BenchmarkType, Os};
     use serde_json::json;
 
     #[test]
@@ -912,7 +898,7 @@ mod request_tests {
     fn download_binary_cracker_includes_version_id() {
         let req = Request::DownloadBinary {
             token: "GHhgdf(/&".to_string(),
-            binary_type: BinaryType::Cracker.into(),
+            binary_type: BinaryType::Cracker,
             binary_version_id: Some(45),
             preprocessor_id: None,
         };
@@ -932,7 +918,7 @@ mod request_tests {
     fn download_binary_util_omits_optional_ids() {
         let req = Request::DownloadBinary {
             token: "GHhgdf(/&".to_string(),
-            binary_type: BinaryType::Extractor.into(),
+            binary_type: BinaryType::Extractor,
             binary_version_id: None,
             preprocessor_id: None,
         };
@@ -1230,9 +1216,10 @@ mod response_tests {
     use super::raw;
     use crate::model::{
         AckResponse, BenchmarkType, BrainConfig, CheckClientVersionResponse, Chunk,
-        DownloadBinaryResponse, GetChunkResponse, GetFileResponse, GetFileStatusResponse,
-        GetFoundResponse, GetHashlistResponse, GetHealthCheckResponse, GetTaskResponse,
-        LoginResponse, Preprocessor, RegisterResponse, ResponseStatus, SendProgressResponse,
+        DownloadCrackerResponse, DownloadPreprocessorResponse, DownloadUtilityResponse,
+        GetChunkResponse, GetFileResponse, GetFileStatusResponse, GetFoundResponse,
+        GetHashlistResponse, GetHealthCheckResponse, GetTaskResponse, LoginResponse, Preprocessor,
+        RegisterResponse, ResponseStatus, SendProgressResponse,
     };
     use serde::de::DeserializeOwned;
     use serde_json::json;
@@ -1374,8 +1361,8 @@ mod response_tests {
     }
 
     #[test]
-    fn download_binary_utility_is_a_direct_url() {
-        let res: DownloadBinaryResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
+    fn download_binary_utility() {
+        let res: DownloadUtilityResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
             "action": "downloadBinary",
             "response": "SUCCESS",
             "executable": "https://example.com/getapp.php"
@@ -1383,15 +1370,15 @@ mod response_tests {
 
         assert_eq!(
             res,
-            DownloadBinaryResponse::Utility {
+            DownloadUtilityResponse {
                 url: "https://example.com/getapp.php".to_string()
             }
         );
     }
 
     #[test]
-    fn download_binary_cracker_is_an_archive() {
-        let res: DownloadBinaryResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
+    fn download_binary_cracker() {
+        let res: DownloadCrackerResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
             "action": "downloadBinary",
             "response": "SUCCESS",
             "url": "https://hashcat.net/files/hashcat-3.01.7z",
@@ -1401,7 +1388,7 @@ mod response_tests {
 
         assert_eq!(
             res,
-            DownloadBinaryResponse::Archive {
+            DownloadCrackerResponse {
                 url: "https://hashcat.net/files/hashcat-3.01.7z".to_string(),
                 name: "Hashcat".to_string(),
                 binary: "hashcat64.bin".to_string()
@@ -1411,7 +1398,7 @@ mod response_tests {
 
     #[test]
     fn download_binary_preprocessor_carries_commands() {
-        let res: DownloadBinaryResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
+        let res: DownloadPreprocessorResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
             "action": "downloadBinary",
             "response": "SUCCESS",
             "url": "https://github.com/hashcat/princeprocessor/releases/download/v0.22/princeprocessor-0.22.7z",
@@ -1424,15 +1411,70 @@ mod response_tests {
 
         assert_eq!(
             res,
-            DownloadBinaryResponse::Preprocessor {
+            DownloadPreprocessorResponse {
                 url: "https://github.com/hashcat/princeprocessor/releases/download/v0.22/princeprocessor-0.22.7z".to_string(),
                 name: "Prince".to_string(),
                 binary: "pp.bin".to_string(),
-                keyspace_command: "--keyspace".to_string(),
-                skip_command: "--skip".to_string(),
-                limit_command: "--limit".to_string()
+                keyspace_command: Some("--keyspace".to_string()),
+                skip_command: Some("--skip".to_string()),
+                limit_command: Some("--limit".to_string())
             }
         );
+    }
+
+    #[test]
+    fn download_binary_preprocessor_allows_absent_commands() {
+        // A preprocessor without a keyspace/skip/limit flag reports them as null;
+        // the agent falls back to head/tail, so the fields are optional.
+        let res: DownloadPreprocessorResponse = decode::<raw::DownloadBinaryResponse, _>(json!({
+            "action": "downloadBinary",
+            "response": "SUCCESS",
+            "url": "https://example.com/pp.7z",
+            "name": "Prince",
+            "executable": "pp.bin",
+            "keyspaceCommand": null,
+            "skipCommand": null,
+            "limitCommand": null
+        }));
+
+        assert_eq!(res.keyspace_command, None);
+        assert_eq!(res.skip_command, None);
+        assert_eq!(res.limit_command, None);
+    }
+
+    #[test]
+    fn download_binary_utility_without_executable_is_rejected() {
+        let raw: raw::DownloadBinaryResponse =
+            serde_json::from_value(json!({"action": "downloadBinary", "response": "SUCCESS"}))
+                .unwrap();
+
+        assert!(DownloadUtilityResponse::try_from(raw).is_err());
+    }
+
+    #[test]
+    fn download_binary_cracker_without_name_is_rejected() {
+        let raw: raw::DownloadBinaryResponse = serde_json::from_value(json!({
+            "action": "downloadBinary",
+            "response": "SUCCESS",
+            "url": "https://hashcat.net/files/hashcat-3.01.7z",
+            "executable": "hashcat64.bin"
+        }))
+        .unwrap();
+
+        assert!(DownloadCrackerResponse::try_from(raw).is_err());
+    }
+
+    #[test]
+    fn download_binary_preprocessor_without_url_is_rejected() {
+        let raw: raw::DownloadBinaryResponse = serde_json::from_value(json!({
+            "action": "downloadBinary",
+            "response": "SUCCESS",
+            "name": "Prince",
+            "executable": "pp.bin"
+        }))
+        .unwrap();
+
+        assert!(DownloadPreprocessorResponse::try_from(raw).is_err());
     }
 
     #[test]

@@ -33,15 +33,6 @@ pub enum BenchmarkType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinaryType {
-    Extractor,
-    Cracker,
-    Prince,
-    Uftpd,
-    Preprocessor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chunk {
     pub id: u64,
     pub skip: u64,
@@ -94,25 +85,26 @@ pub enum CheckClientVersionResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DownloadBinaryResponse {
-    // NB: on the wire this URL arrives in the `executable` field (not `url`);
-    // we expose it as `url` here to mirror the other variants
-    Utility {
-        url: String,
-    },
-    Archive {
-        url: String,
-        name: String,
-        binary: String,
-    },
-    Preprocessor {
-        url: String,
-        name: String,
-        binary: String,
-        keyspace_command: String,
-        skip_command: String,
-        limit_command: String,
-    },
+pub struct DownloadUtilityResponse {
+    // NB: on the wire this URL arrives in the `executable` field (not `url`)
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadCrackerResponse {
+    pub url: String,
+    pub name: String,
+    pub binary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadPreprocessorResponse {
+    pub url: String,
+    pub name: String,
+    pub binary: String,
+    pub keyspace_command: Option<String>,
+    pub skip_command: Option<String>,
+    pub limit_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

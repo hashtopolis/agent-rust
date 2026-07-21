@@ -4,12 +4,12 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::model::{
-    AckResponse, BenchmarkType, BinaryType, CheckClientVersionResponse, DownloadBinaryResponse,
-    GetChunkResponse, GetFileResponse, GetFileStatusResponse, GetFoundResponse,
-    GetHashlistResponse, GetHealthCheckResponse, GetTaskResponse, LoginResponse, Os,
-    ProgressReport, RegisterResponse, SendProgressResponse,
+    AckResponse, BenchmarkType, CheckClientVersionResponse, DownloadCrackerResponse,
+    DownloadPreprocessorResponse, DownloadUtilityResponse, GetChunkResponse, GetFileResponse,
+    GetFileStatusResponse, GetFoundResponse, GetHashlistResponse, GetHealthCheckResponse,
+    GetTaskResponse, LoginResponse, Os, ProgressReport, RegisterResponse, SendProgressResponse,
 };
-use crate::protocol::{ProtocolError, Request, raw};
+use crate::protocol::{BinaryType, ProtocolError, Request, raw};
 use crate::transport::{Transport, TransportError};
 
 #[derive(Debug)]
@@ -175,24 +175,66 @@ impl<T: Transport> Client<T> {
         Ok(CheckClientVersionResponse::try_from(raw)?)
     }
 
-    pub async fn download_binary(
+    pub async fn download_extractor(&self) -> Result<DownloadUtilityResponse, ClientError> {
+        self.download_utility(BinaryType::Extractor).await
+    }
+
+    pub async fn download_uftpd(&self) -> Result<DownloadUtilityResponse, ClientError> {
+        self.download_utility(BinaryType::Uftpd).await
+    }
+
+    pub async fn download_cracker(
         &self,
-        binary_type: BinaryType,
-        binary_version_id: Option<u64>,
-        preprocessor_id: Option<u64>,
-    ) -> Result<DownloadBinaryResponse, ClientError> {
+        binary_version_id: u64,
+    ) -> Result<DownloadCrackerResponse, ClientError> {
         let raw: raw::DownloadBinaryResponse = self
             .call(
                 "downloadBinary",
                 Request::DownloadBinary {
                     token: self.token_owned(),
-                    binary_type: binary_type.into(),
-                    binary_version_id,
-                    preprocessor_id,
+                    binary_type: BinaryType::Cracker,
+                    binary_version_id: Some(binary_version_id),
+                    preprocessor_id: None,
                 },
             )
             .await?;
-        Ok(DownloadBinaryResponse::try_from(raw)?)
+        Ok(DownloadCrackerResponse::try_from(raw)?)
+    }
+
+    pub async fn download_preprocessor(
+        &self,
+        preprocessor_id: u64,
+    ) -> Result<DownloadPreprocessorResponse, ClientError> {
+        let raw: raw::DownloadBinaryResponse = self
+            .call(
+                "downloadBinary",
+                Request::DownloadBinary {
+                    token: self.token_owned(),
+                    binary_type: BinaryType::Preprocessor,
+                    binary_version_id: None,
+                    preprocessor_id: Some(preprocessor_id),
+                },
+            )
+            .await?;
+        Ok(DownloadPreprocessorResponse::try_from(raw)?)
+    }
+
+    async fn download_utility(
+        &self,
+        binary_type: BinaryType,
+    ) -> Result<DownloadUtilityResponse, ClientError> {
+        let raw: raw::DownloadBinaryResponse = self
+            .call(
+                "downloadBinary",
+                Request::DownloadBinary {
+                    token: self.token_owned(),
+                    binary_type,
+                    binary_version_id: None,
+                    preprocessor_id: None,
+                },
+            )
+            .await?;
+        Ok(DownloadUtilityResponse::try_from(raw)?)
     }
 
     pub async fn get_task(&self) -> Result<GetTaskResponse, ClientError> {
