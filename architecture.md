@@ -18,7 +18,7 @@ Crude, first-pass architecture for the Rust rewrite of the Hashtopolis agent.
 | CLI            | clap (args + env)              |
 | Serialization  | serde                          |
 
-## Proposed file structure
+## File structure
 
 ```
 src/
@@ -27,15 +27,19 @@ src/
 
   agent.rs         # main loop + task/chunk dispatch / state machine
   cracker.rs       # Cracker trait + factory (chooses backend)
-  model.rs         # domain types: Task enum, Chunk, etc.
-  protocol.rs      # wire DTOs (serde): requests, responses, actions
-  transport.rs     # http client + auth + retry (+ uftpd?)
+  transport.rs     # low-level HTTP: Transport trait, reqwest impl
   client.rs        # typed server API: getFileStatus, getTask, getChunk, ...
   config.rs        # typesafe config
   sysinfo.rs       # OS + device inventory
   process.rs       # process helpers, stdio stream handling / reporting
   update.rs        # self-update machinery
   assets.rs        # helper binaries (uftpd?)
+
+  model/
+    mod.rs         # domain types: task assignment, Chunk, response types, ...
+    raw.rs         # wire DTOs (serde): requests, responses, actions (crate-internal)
+    convert.rs     # raw <-> domain translation, ProtocolError
+    tests/         # unit tests for wire (de)serialization and conversion
 
   backend/
     mod.rs
@@ -46,6 +50,9 @@ src/
     generic/
       mod.rs
       status.rs    # generic status parser
+
+tests/
+  client/          # integration tests for client against a mock Transport
 ```
 
 ## Module responsibilities
@@ -53,10 +60,11 @@ src/
 - **agent.rs** — orchestrator. Owns the run loop, asks `client` for work, dispatches tasks/chunks to a backend via the `Cracker` trait, reports progress. Holds the state machine.
 - **cracker.rs** — defines the `Cracker` trait and a factory that selects the hashcat or generic backend.
 - **backend/** — one submodule per supported binary. Each owns its own status parser and binary-specific helpers (keyspace calc, command building).
-- **model.rs** — core domain types shared across modules (`Task` as a tagged union / enum, `Chunk`, etc.).
-- **protocol.rs** — serde-serializable wire DTOs for every server request/response and action. Kept separate from `model.rs` so the domain model isn't coupled to the wire format.
-- **transport.rs** — low-level HTTP: reqwest client, auth, retry. Possibly uftp for multicast download.
-- **client.rs** — typed, high-level API over `transport` (`getFileStatus`, `getTask`, `getChunk`, ...). No raw JSON leaks past this layer.
+- **model/** — core domain types shared across modules (`TaskAssignment`, `Chunk`, response types, etc.) plus the wire layer they are decoded from:
+  - **model/raw.rs** — serde-serializable wire DTOs for every server request/response and action: exactly what goes over the wire, before any interpretation.
+  - **model/convert.rs** — translation between `raw` and the domain types
+- **transport.rs** — low-level HTTP: the `Transport` trait (one `post_json` call) and its reqwest implementation.
+- **client.rs** — typed, high-level API over `Transport` (`getFileStatus`, `getTask`, `getChunk`, ...). No raw JSON leaks past this layer. Integration-tested in `tests/client/` against a mock `Transport`. Is allowed to use `model::raw` module 
 - **config.rs** — typesafe config, no string-keyed lookups.
 - **sysinfo.rs** — OS and device inventory for registration / status reporting.
 - **process.rs** — spawning child processes, streaming stdio, reporting.
