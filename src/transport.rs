@@ -1,7 +1,7 @@
-use std::fmt;
 use std::time::Duration;
 
 use serde_json::Value;
+use thiserror::Error;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -9,34 +9,12 @@ pub trait Transport {
     async fn post_json(&self, body: &Value) -> Result<Value, TransportError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum TransportError {
-    Http(reqwest::Error),
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("unexpected status code from server: {0}")]
     Status(u16),
-}
-
-impl fmt::Display for TransportError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TransportError::Http(e) => write!(f, "http error: {e}"),
-            TransportError::Status(code) => write!(f, "unexpected status code from server: {code}"),
-        }
-    }
-}
-
-impl std::error::Error for TransportError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            TransportError::Http(e) => Some(e),
-            TransportError::Status(_) => None,
-        }
-    }
-}
-
-impl From<reqwest::Error> for TransportError {
-    fn from(e: reqwest::Error) -> Self {
-        TransportError::Http(e)
-    }
 }
 
 #[derive(Debug, Clone)]

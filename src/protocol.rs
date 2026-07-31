@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::model::{
     self, BrainConfig, Chunk, Preprocessor, ResponseEnvelope, ResponseStatus, TaskAssignment,
@@ -271,22 +272,11 @@ pub(crate) enum Request {
     Deregister { token: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProtocolError {
+    #[error("missing expected field '{0}' in server response")]
     MissingField(&'static str),
 }
-
-impl std::fmt::Display for ProtocolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProtocolError::MissingField(name) => {
-                write!(f, "missing expected field '{name}' in server response")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ProtocolError {}
 
 trait Require<T> {
     fn require(self, field: &'static str) -> Result<T, ProtocolError>;

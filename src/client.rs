@@ -1,7 +1,6 @@
-use std::fmt;
-
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::model::{
     AckResponse, BenchmarkType, CheckClientVersionResponse, DownloadCrackerResponse,
@@ -12,58 +11,19 @@ use crate::model::{
 use crate::protocol::{BinaryType, ProtocolError, Request, raw};
 use crate::transport::{Transport, TransportError};
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ClientError {
-    Transport(TransportError),
+    #[error("transport error: {0}")]
+    Transport(#[from] TransportError),
+    #[error("server error on '{action}'{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
     Server {
         action: &'static str,
         message: Option<String>,
     },
-    Codec(serde_json::Error),
-    Protocol(ProtocolError),
-}
-
-impl fmt::Display for ClientError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ClientError::Transport(e) => write!(f, "transport error: {e}"),
-            ClientError::Server { action, message } => match message {
-                Some(m) => write!(f, "server error on '{action}': {m}"),
-                None => write!(f, "server error on '{action}'"),
-            },
-            ClientError::Codec(e) => write!(f, "codec error: {e}"),
-            ClientError::Protocol(e) => write!(f, "protocol error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for ClientError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ClientError::Transport(e) => Some(e),
-            ClientError::Codec(e) => Some(e),
-            ClientError::Protocol(e) => Some(e),
-            ClientError::Server { .. } => None,
-        }
-    }
-}
-
-impl From<TransportError> for ClientError {
-    fn from(e: TransportError) -> Self {
-        ClientError::Transport(e)
-    }
-}
-
-impl From<serde_json::Error> for ClientError {
-    fn from(e: serde_json::Error) -> Self {
-        ClientError::Codec(e)
-    }
-}
-
-impl From<ProtocolError> for ClientError {
-    fn from(e: ProtocolError) -> Self {
-        ClientError::Protocol(e)
-    }
+    #[error("codec error: {0}")]
+    Codec(#[from] serde_json::Error),
+    #[error("protocol error: {0}")]
+    Protocol(#[from] ProtocolError),
 }
 
 #[derive(Debug, Clone)]
