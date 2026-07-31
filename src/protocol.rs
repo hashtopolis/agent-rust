@@ -307,8 +307,6 @@ pub(crate) mod raw {
     pub(crate) enum Status {
         #[serde(rename = "SUCCESS")]
         Success,
-        #[serde(rename = "OK")]
-        Ok,
         #[serde(rename = "ERROR")]
         Error,
         #[serde(other)]
@@ -489,7 +487,7 @@ pub(crate) mod raw {
 impl From<raw::Status> for ResponseStatus {
     fn from(status: raw::Status) -> Self {
         match status {
-            raw::Status::Success | raw::Status::Ok => ResponseStatus::Success,
+            raw::Status::Success => ResponseStatus::Success,
             raw::Status::Error => ResponseStatus::Error,
             raw::Status::Other => ResponseStatus::Other,
         }

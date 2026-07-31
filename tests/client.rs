@@ -806,9 +806,8 @@ async fn get_health_check_error() {
 }
 
 #[tokio::test]
-async fn send_health_check_accepts_ok_response() {
-    // sendHealthCheck is the one action the server answers with "OK".
-    let client = mock_client_returning(json!({"action": "sendHealthCheck", "response": "OK"}));
+async fn send_health_check_returns_ack() {
+    let client = mock_client_returning(json!({"action": "sendHealthCheck", "response": "SUCCESS"}));
 
     let res = client
         .send_health_check(
@@ -854,20 +853,6 @@ async fn send_health_check_error() {
             .await,
         "sendHealthCheck",
     );
-}
-
-#[tokio::test]
-async fn send_health_check_rejects_generic_success() {
-    // This endpoint expects "OK" specifically; a stray "SUCCESS" is an error.
-    let client = mock_client_returning(json!({"action": "sendHealthCheck", "response": "SUCCESS"}));
-
-    match client
-        .send_health_check(7, 23, 1536306884, 1536306902, 1, &[] as &[&str])
-        .await
-    {
-        Err(ClientError::Server { action, .. }) => assert_eq!(action, "sendHealthCheck"),
-        other => panic!("expected server error, got {other:?}"),
-    }
 }
 
 #[tokio::test]

@@ -416,7 +416,7 @@ impl<T: Transport> Client<T> {
         num_gpus: u32,
         errors: &[impl AsRef<str>],
     ) -> Result<AckResponse, ClientError> {
-        self.call_ack_expecting(
+        self.call_ack(
             "sendHealthCheck",
             Request::SendHealthCheck {
                 token: self.token_owned(),
@@ -427,7 +427,6 @@ impl<T: Transport> Client<T> {
                 num_gpus,
                 errors: to_string_vec(errors),
             },
-            raw::Status::Ok,
         )
         .await
     }
@@ -451,22 +450,20 @@ impl<T: Transport> Client<T> {
         action: &'static str,
         request: Request,
     ) -> Result<R, ClientError> {
-        self.call_expecting(action, request, raw::Status::Success)
-            .await
-    }
-
-    /// Like [`Client::call`] but gated on a caller-supplied success token.
-    /// Every action answers with "SUCCESS" except `sendHealthCheck`, which the
-    /// server answers with "OK" (see `APISendHealthCheck` server-side).
-    async fn call_expecting<R: DeserializeOwned>(
-        &self,
-        action: &'static str,
-        request: Request,
-        expected_status: raw::Status,
-    ) -> Result<R, ClientError> {
         let body = serde_json::to_value(&request)?;
         let value = self.transport.post_json(&body).await?;
-        check_status(&value, action, expected_status)?;
+        let status = value
+            .get("response")
+            .and_then(|response| serde_json::from_value::<raw::Status>(response.clone()).ok());
+        if status != Some(raw::Status::Success) {
+            return Err(ClientError::Server {
+                action,
+                message: value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            });
+        }
         Ok(serde_json::from_value(value)?)
     }
 
@@ -475,43 +472,11 @@ impl<T: Transport> Client<T> {
         action: &'static str,
         request: Request,
     ) -> Result<AckResponse, ClientError> {
-        self.call_ack_expecting(action, request, raw::Status::Success)
-            .await
-    }
-
-    async fn call_ack_expecting(
-        &self,
-        action: &'static str,
-        request: Request,
-        expected_status: raw::Status,
-    ) -> Result<AckResponse, ClientError> {
-        let raw: raw::AckResponse = self
-            .call_expecting(action, request, expected_status)
-            .await?;
+        let raw: raw::AckResponse = self.call(action, request).await?;
         Ok(raw.into())
     }
 }
 
 fn to_string_vec(items: &[impl AsRef<str>]) -> Vec<String> {
     items.iter().map(|s| s.as_ref().to_owned()).collect()
-}
-
-fn check_status(
-    value: &Value,
-    action: &'static str,
-    expected_status: raw::Status,
-) -> Result<(), ClientError> {
-    let status = value
-        .get("response")
-        .and_then(|response| serde_json::from_value::<raw::Status>(response.clone()).ok());
-    match status {
-        Some(status) if status == expected_status => Ok(()),
-        _ => Err(ClientError::Server {
-            action,
-            message: value
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        }),
-    }
 }
