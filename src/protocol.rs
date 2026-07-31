@@ -291,12 +291,16 @@ pub(crate) mod raw {
 
     use super::{BenchmarkType, ChunkStatus, UpdateVersion};
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-    pub(crate) enum Status {
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(tag = "response")]
+    pub(crate) enum Reply<P> {
         #[serde(rename = "SUCCESS")]
-        Success,
+        Success(P),
         #[serde(rename = "ERROR")]
-        Error,
+        Error {
+            #[serde(default)]
+            message: Option<String>,
+        },
         #[serde(other)]
         Other,
     }

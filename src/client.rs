@@ -1,5 +1,4 @@
 use serde::de::{DeserializeOwned, IgnoredAny};
-use serde_json::Value;
 use thiserror::Error;
 
 use crate::model::{
@@ -408,19 +407,14 @@ impl<T: Transport> Client<T> {
     ) -> Result<R, ClientError> {
         let body = serde_json::to_value(&request)?;
         let value = self.transport.post_json(&body).await?;
-        let status = value
-            .get("response")
-            .and_then(|response| serde_json::from_value::<raw::Status>(response.clone()).ok());
-        if status != Some(raw::Status::Success) {
-            return Err(ClientError::Server {
+        match serde_json::from_value::<raw::Reply<R>>(value)? {
+            raw::Reply::Success(payload) => Ok(payload),
+            raw::Reply::Error { message } => Err(ClientError::Server { action, message }),
+            raw::Reply::Other => Err(ClientError::Server {
                 action,
-                message: value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            });
+                message: None,
+            }),
         }
-        Ok(serde_json::from_value(value)?)
     }
 
     /// Runs an action whose reply carries nothing beyond the status, so there is

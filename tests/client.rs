@@ -915,6 +915,16 @@ async fn undecodable_success_body_maps_to_codec_error() {
 }
 
 #[tokio::test]
+async fn malformed_success_payload_maps_to_codec_error() {
+    let client =
+        mock_client_returning(json!({"action": "getChunk", "response": "SUCCESS", "status": 5}));
+
+    let err = client.get_chunk(5).await.unwrap_err();
+
+    assert!(matches!(err, ClientError::Codec(_)));
+}
+
+#[tokio::test]
 async fn new_token_is_used_after_set_token() {
     let transport =
         MockTransport::new(json!({"action": "getTask", "response": "SUCCESS", "taskId": null}));
