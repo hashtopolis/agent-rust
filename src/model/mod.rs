@@ -1,3 +1,14 @@
+//! The domain types the agent works with, plus the wire layer they are
+//! decoded from: [`raw`] holds the on-the-wire shapes and [`convert`] the
+//! translation between the two.
+
+mod convert;
+pub(crate) mod raw;
+pub use convert::ProtocolError;
+
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
     Linux,
@@ -6,22 +17,24 @@ pub enum Os {
 }
 
 impl Os {
-    pub const fn binary_extension(self) -> &'static str {
-        match self {
-            Os::Windows => ".exe",
-            Os::Linux | Os::Darwin => "",
+    pub const fn detect() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            Os::Linux
         }
-    }
-
-    pub const fn detect() -> Option<Self> {
-        if cfg!(target_os = "linux") {
-            Some(Os::Linux)
-        } else if cfg!(target_os = "windows") {
-            Some(Os::Windows)
-        } else if cfg!(target_os = "macos") {
-            Some(Os::Darwin)
-        } else {
-            None
+        #[cfg(target_os = "windows")]
+        {
+            Os::Windows
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Os::Darwin
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        {
+            compile_error!(
+                "unsupported target: Hashtopolis defines OS codes only for linux, windows and macos"
+            )
         }
     }
 }

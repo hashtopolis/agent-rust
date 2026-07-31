@@ -1,13 +1,14 @@
 use serde::de::{DeserializeOwned, IgnoredAny};
 use thiserror::Error;
 
+use crate::model::raw::{self, BinaryType, Request};
 use crate::model::{
     BenchmarkType, CheckClientVersionResponse, DownloadCrackerResponse,
     DownloadPreprocessorResponse, DownloadUtilityResponse, GetChunkResponse, GetFileResponse,
     GetFileStatusResponse, GetFoundResponse, GetHashlistResponse, GetHealthCheckResponse,
-    GetTaskResponse, LoginResponse, Os, ProgressReport, RegisterResponse, SendProgressResponse,
+    GetTaskResponse, LoginResponse, Os, ProgressReport, ProtocolError, RegisterResponse,
+    SendProgressResponse,
 };
-use crate::protocol::{BinaryType, ProtocolError, Request, raw};
 use crate::transport::{Transport, TransportError};
 
 #[derive(Debug, Error)]
@@ -101,7 +102,6 @@ impl<T: Transport> Client<T> {
     pub async fn update_information(
         &self,
         uid: impl Into<String>,
-        os: Os,
         devices: &[impl AsRef<str>],
     ) -> Result<(), ClientError> {
         self.call_ack(
@@ -109,7 +109,7 @@ impl<T: Transport> Client<T> {
             Request::UpdateInformation {
                 token: self.token_owned(),
                 uid: uid.into(),
-                os: os.into(),
+                os: Os::detect().into(),
                 devices: to_string_vec(devices),
             },
         )
