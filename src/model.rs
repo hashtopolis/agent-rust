@@ -39,33 +39,6 @@ pub struct Chunk {
     pub length: u64,
 }
 
-/// Success/error status shared by every server response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResponseStatus {
-    Success,
-    Error,
-    Other,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResponseEnvelope {
-    pub action: Option<String>,
-    pub response: ResponseStatus,
-    pub message: Option<String>,
-}
-
-impl ResponseEnvelope {
-    pub fn is_success(&self) -> bool {
-        self.response == ResponseStatus::Success
-    }
-}
-
-/// Reply for every action whose only payload is the SUCCESS/ERROR status itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AckResponse {
-    pub envelope: ResponseEnvelope,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterResponse {
     pub token: String,

@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::model::{
-    self, BrainConfig, Chunk, Preprocessor, ResponseEnvelope, ResponseStatus, TaskAssignment,
-};
+use crate::model::{self, BrainConfig, Chunk, Preprocessor, TaskAssignment};
 
 /// Classifies `taskId` field in a `getTask` reply:
 /// - absent means no task,
@@ -304,21 +302,6 @@ pub(crate) mod raw {
     }
 
     #[derive(Debug, Clone, Deserialize)]
-    pub(crate) struct Envelope {
-        #[serde(default)]
-        pub action: Option<String>,
-        pub response: Status,
-        #[serde(default)]
-        pub message: Option<String>,
-    }
-
-    #[derive(Debug, Clone, Deserialize)]
-    pub(crate) struct AckResponse {
-        #[serde(flatten)]
-        pub envelope: Envelope,
-    }
-
-    #[derive(Debug, Clone, Deserialize)]
     pub(crate) struct GetTaskResponse {
         #[serde(rename = "taskId", default)]
         pub task_id: Option<i64>,
@@ -471,34 +454,6 @@ pub(crate) mod raw {
         pub agent: Option<String>,
         #[serde(default)]
         pub zaps: Vec<String>,
-    }
-}
-
-impl From<raw::Status> for ResponseStatus {
-    fn from(status: raw::Status) -> Self {
-        match status {
-            raw::Status::Success => ResponseStatus::Success,
-            raw::Status::Error => ResponseStatus::Error,
-            raw::Status::Other => ResponseStatus::Other,
-        }
-    }
-}
-
-impl From<raw::Envelope> for ResponseEnvelope {
-    fn from(envelope: raw::Envelope) -> Self {
-        ResponseEnvelope {
-            action: envelope.action,
-            response: envelope.response.into(),
-            message: envelope.message,
-        }
-    }
-}
-
-impl From<raw::AckResponse> for model::AckResponse {
-    fn from(raw: raw::AckResponse) -> Self {
-        model::AckResponse {
-            envelope: raw.envelope.into(),
-        }
     }
 }
 
@@ -1203,11 +1158,10 @@ mod request_tests {
 mod response_tests {
     use super::raw;
     use crate::model::{
-        AckResponse, BenchmarkType, BrainConfig, CheckClientVersionResponse, Chunk,
-        DownloadCrackerResponse, DownloadPreprocessorResponse, DownloadUtilityResponse,
-        GetChunkResponse, GetFileResponse, GetFileStatusResponse, GetFoundResponse,
-        GetHashlistResponse, GetHealthCheckResponse, GetTaskResponse, LoginResponse, Preprocessor,
-        RegisterResponse, ResponseStatus, SendProgressResponse,
+        BenchmarkType, BrainConfig, CheckClientVersionResponse, Chunk, DownloadCrackerResponse,
+        DownloadPreprocessorResponse, DownloadUtilityResponse, GetChunkResponse, GetFileResponse,
+        GetFileStatusResponse, GetFoundResponse, GetHashlistResponse, GetHealthCheckResponse,
+        GetTaskResponse, LoginResponse, Preprocessor, RegisterResponse, SendProgressResponse,
     };
     use serde::de::DeserializeOwned;
     use serde_json::json;
@@ -1220,19 +1174,6 @@ mod response_tests {
     {
         let raw: Raw = serde_json::from_value(value).expect("raw wire decode failed");
         Real::try_from(raw).expect("raw -> real conversion failed")
-    }
-
-    fn ack(value: serde_json::Value) -> AckResponse {
-        let raw: raw::AckResponse = serde_json::from_value(value).expect("ack decode failed");
-        raw.into()
-    }
-
-    #[test]
-    fn envelope_reports_success() {
-        let res = ack(json!({"action": "register", "response": "SUCCESS"}));
-
-        assert!(res.envelope.is_success());
-        assert_eq!(res.envelope.action.as_deref(), Some("register"));
     }
 
     #[test]
@@ -1252,37 +1193,6 @@ mod response_tests {
             serde_json::from_value(json!({"action": "register", "response": "SUCCESS"})).unwrap();
 
         assert!(RegisterResponse::try_from(raw).is_err());
-    }
-
-    #[test]
-    fn envelope_carries_error_message() {
-        let res = ack(json!({
-            "action": "updateInformation",
-            "response": "ERROR",
-            "message": "Invalid token!"
-        }));
-
-        assert_eq!(res.envelope.response, ResponseStatus::Error);
-        assert!(!res.envelope.is_success());
-        assert_eq!(res.envelope.message.as_deref(), Some("Invalid token!"));
-    }
-
-    #[test]
-    fn unknown_response_status_falls_back_to_other() {
-        let res = ack(json!({
-            "action": "testConnection",
-            "response": "SOMETHING_ELSE"
-        }));
-
-        assert_eq!(res.envelope.response, ResponseStatus::Other);
-    }
-
-    #[test]
-    fn simple_success_needs_only_the_status() {
-        let res = ack(json!({"action": "deregister", "response": "SUCCESS"}));
-
-        assert!(res.envelope.is_success());
-        assert!(res.envelope.message.is_none());
     }
 
     #[test]
@@ -1658,17 +1568,6 @@ mod response_tests {
             }));
             assert_eq!(res, expected, "status {status}");
         }
-    }
-
-    #[test]
-    fn ack_only_actions_decode_from_the_status_alone() {
-        let res = ack(json!({
-            "action": "sendKeyspace",
-            "response": "SUCCESS",
-            "keyspace": "OK"
-        }));
-
-        assert!(res.envelope.is_success());
     }
 
     #[test]

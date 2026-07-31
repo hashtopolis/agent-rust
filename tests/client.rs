@@ -39,12 +39,11 @@ fn assert_client_sent_body(client: &Client<MockTransport>, expected: Value) {
 }
 
 #[tokio::test]
-async fn test_connection_returns_ack() {
+async fn test_connection_succeeds() {
     let client = mock_client_returning(json!({"action": "testConnection", "response": "SUCCESS"}));
 
-    let res = client.test_connection().await.unwrap();
+    client.test_connection().await.unwrap();
 
-    assert!(res.envelope.is_success());
     assert_client_sent_body(&client, json!({"action": "testConnection"}));
 }
 
@@ -122,16 +121,15 @@ async fn login_error() {
 }
 
 #[tokio::test]
-async fn update_information_returns_ack() {
+async fn update_information_succeeds() {
     let client =
         mock_client_returning(json!({"action": "updateInformation", "response": "SUCCESS"}));
 
-    let res = client
+    client
         .update_information("230-34-345-345", Os::Linux, &["ATI HD7970", "ATI HD7970"])
         .await
         .unwrap();
 
-    assert!(res.envelope.is_success());
     assert_client_sent_body(
         &client,
         json!({
@@ -464,14 +462,13 @@ async fn get_chunk_error() {
 }
 
 #[tokio::test]
-async fn send_keyspace_returns_ack() {
+async fn send_keyspace_succeeds() {
     let client = mock_client_returning(
         json!({"action": "sendKeyspace", "response": "SUCCESS", "keyspace": "OK"}),
     );
 
-    let res = client.send_keyspace(35, 568000).await.unwrap();
+    client.send_keyspace(35, 568000).await.unwrap();
 
-    assert!(res.envelope.is_success());
     assert_client_sent_body(
         &client,
         json!({"action": "sendKeyspace", "token": TOKEN, "taskId": 35, "keyspace": 568000}),
@@ -486,17 +483,16 @@ async fn send_keyspace_error() {
 }
 
 #[tokio::test]
-async fn send_benchmark_returns_ack() {
+async fn send_benchmark_succeeds() {
     let client = mock_client_returning(
         json!({"action": "sendBenchmark", "response": "SUCCESS", "benchmark": "OK"}),
     );
 
-    let res = client
+    client
         .send_benchmark(35, BenchmarkType::Speed, "674:674.74")
         .await
         .unwrap();
 
-    assert!(res.envelope.is_success());
     assert_client_sent_body(
         &client,
         json!({
@@ -620,15 +616,14 @@ async fn send_progress_error() {
 }
 
 #[tokio::test]
-async fn client_error_returns_ack() {
+async fn client_error_succeeds() {
     let client = mock_client_returning(json!({"action": "clientError", "response": "SUCCESS"}));
 
-    let res = client
+    client
         .client_error(45, Some(1), "This is a sample error message!")
         .await
         .unwrap();
 
-    assert!(res.envelope.is_success());
     assert_client_sent_body(
         &client,
         json!({
@@ -806,10 +801,10 @@ async fn get_health_check_error() {
 }
 
 #[tokio::test]
-async fn send_health_check_returns_ack() {
+async fn send_health_check_succeeds() {
     let client = mock_client_returning(json!({"action": "sendHealthCheck", "response": "SUCCESS"}));
 
-    let res = client
+    client
         .send_health_check(
             7,
             23,
@@ -824,7 +819,6 @@ async fn send_health_check_returns_ack() {
         .await
         .unwrap();
 
-    assert!(res.envelope.is_success());
     assert_client_sent_body(
         &client,
         json!({
@@ -856,12 +850,11 @@ async fn send_health_check_error() {
 }
 
 #[tokio::test]
-async fn deregister_returns_ack() {
+async fn deregister_succeeds() {
     let client = mock_client_returning(json!({"action": "deregister", "response": "SUCCESS"}));
 
-    let res = client.deregister().await.unwrap();
+    client.deregister().await.unwrap();
 
-    assert!(res.envelope.is_success());
     assert_client_sent_body(&client, json!({"action": "deregister", "token": TOKEN}));
 }
 
@@ -870,6 +863,20 @@ async fn deregister_error() {
     let client = mock_client_returning(error_reply("deregister"));
 
     assert_server_error(client.deregister().await, "deregister");
+}
+
+#[tokio::test]
+async fn unknown_response_status_is_rejected() {
+    let client =
+        mock_client_returning(json!({"action": "testConnection", "response": "SOMETHING_ELSE"}));
+
+    match client.test_connection().await {
+        Err(ClientError::Server { action, message }) => {
+            assert_eq!(action, "testConnection");
+            assert!(message.is_none());
+        }
+        other => panic!("expected server error, got {other:?}"),
+    }
 }
 
 #[tokio::test]

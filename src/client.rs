@@ -1,9 +1,9 @@
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::model::{
-    AckResponse, BenchmarkType, CheckClientVersionResponse, DownloadCrackerResponse,
+    BenchmarkType, CheckClientVersionResponse, DownloadCrackerResponse,
     DownloadPreprocessorResponse, DownloadUtilityResponse, GetChunkResponse, GetFileResponse,
     GetFileStatusResponse, GetFoundResponse, GetHashlistResponse, GetHealthCheckResponse,
     GetTaskResponse, LoginResponse, Os, ProgressReport, RegisterResponse, SendProgressResponse,
@@ -59,7 +59,7 @@ impl<T: Transport> Client<T> {
         &self.transport
     }
 
-    pub async fn test_connection(&self) -> Result<AckResponse, ClientError> {
+    pub async fn test_connection(&self) -> Result<(), ClientError> {
         self.call_ack("testConnection", Request::TestConnection)
             .await
     }
@@ -104,7 +104,7 @@ impl<T: Transport> Client<T> {
         uid: impl Into<String>,
         os: Os,
         devices: &[impl AsRef<str>],
-    ) -> Result<AckResponse, ClientError> {
+    ) -> Result<(), ClientError> {
         self.call_ack(
             "updateInformation",
             Request::UpdateInformation {
@@ -222,11 +222,7 @@ impl<T: Transport> Client<T> {
         Ok(GetChunkResponse::try_from(raw)?)
     }
 
-    pub async fn send_keyspace(
-        &self,
-        task_id: u64,
-        keyspace: u64,
-    ) -> Result<AckResponse, ClientError> {
+    pub async fn send_keyspace(&self, task_id: u64, keyspace: u64) -> Result<(), ClientError> {
         self.call_ack(
             "sendKeyspace",
             Request::SendKeyspace {
@@ -243,7 +239,7 @@ impl<T: Transport> Client<T> {
         task_id: u64,
         bench_type: BenchmarkType,
         result: impl Into<String>,
-    ) -> Result<AckResponse, ClientError> {
+    ) -> Result<(), ClientError> {
         self.call_ack(
             "sendBenchmark",
             Request::SendBenchmark {
@@ -286,7 +282,7 @@ impl<T: Transport> Client<T> {
         task_id: u64,
         chunk_id: Option<u64>,
         message: impl Into<String>,
-    ) -> Result<AckResponse, ClientError> {
+    ) -> Result<(), ClientError> {
         self.call_ack(
             "clientError",
             Request::ClientError {
@@ -375,7 +371,7 @@ impl<T: Transport> Client<T> {
         end: i64,
         num_gpus: u32,
         errors: &[impl AsRef<str>],
-    ) -> Result<AckResponse, ClientError> {
+    ) -> Result<(), ClientError> {
         self.call_ack(
             "sendHealthCheck",
             Request::SendHealthCheck {
@@ -391,7 +387,7 @@ impl<T: Transport> Client<T> {
         .await
     }
 
-    pub async fn deregister(&self) -> Result<AckResponse, ClientError> {
+    pub async fn deregister(&self) -> Result<(), ClientError> {
         self.call_ack(
             "deregister",
             Request::Deregister {
@@ -427,13 +423,11 @@ impl<T: Transport> Client<T> {
         Ok(serde_json::from_value(value)?)
     }
 
-    async fn call_ack(
-        &self,
-        action: &'static str,
-        request: Request,
-    ) -> Result<AckResponse, ClientError> {
-        let raw: raw::AckResponse = self.call(action, request).await?;
-        Ok(raw.into())
+    /// Runs an action whose reply carries nothing beyond the status, so there is
+    /// no payload to decode once [`Client::call`] has accepted it.
+    async fn call_ack(&self, action: &'static str, request: Request) -> Result<(), ClientError> {
+        self.call::<IgnoredAny>(action, request).await?;
+        Ok(())
     }
 }
 
