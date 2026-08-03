@@ -30,8 +30,7 @@ pub enum Step {
 
 pub struct LoopState {
     current_task: Option<TaskAssignment>,
-    last_task_id: Option<u64>,
-    task_change: bool,
+    prepared_task_id: Option<u64>,
     measured_keyspace: Option<u64>,
     last_deletion_check: Option<Instant>,
 }
@@ -40,8 +39,7 @@ impl LoopState {
     pub fn new() -> Self {
         Self {
             current_task: None,
-            last_task_id: None,
-            task_change: true,
+            prepared_task_id: None,
             measured_keyspace: None,
             last_deletion_check: None,
         }
@@ -54,6 +52,10 @@ impl LoopState {
     fn reset_task(&mut self) {
         self.current_task = None;
         self.measured_keyspace = None;
+    }
+
+    fn invalidate_setup(&mut self) {
+        self.prepared_task_id = None;
     }
 }
 
@@ -105,15 +107,12 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                 }
                 Ok(GetTaskResponse::NoTask { reason }) => {
                     tracing::info!(?reason, "no task available");
-                    state.task_change = true;
+                    state.invalidate_setup();
+
                     return Ok(Step::Sleep(IDLE_DELAY));
                 }
                 Ok(GetTaskResponse::Task(task)) => {
                     let task = *task;
-                    if state.last_task_id != Some(task.task_id) {
-                        state.task_change = true;
-                    }
-                    state.last_task_id = Some(task.task_id);
                     tracing::info!(task_id = task.task_id, "got task");
                     state.current_task = Some(task);
                 }
@@ -135,7 +134,7 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             Ok(cracker) => cracker,
             Err(error) => {
                 tracing::warn!(%error, cracker_id = task.cracker_id, "cracker not ready");
-                state.task_change = true;
+                state.invalidate_setup();
                 state.reset_task();
 
                 return Ok(Step::Sleep(RETRY_DELAY));
@@ -165,7 +164,7 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             return Ok(Step::Sleep(RETRY_DELAY));
         }
 
-        if state.task_change {
+        if state.prepared_task_id != Some(task.task_id) {
             if let Err(error) = self
                 .provisioner
                 .ensure_hashlist(&self.client, task.hashlist_id)
@@ -190,9 +189,9 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
 
                 return Ok(Step::Sleep(RETRY_DELAY));
             }
-        }
 
-        state.task_change = false;
+            state.prepared_task_id = Some(task.task_id);
+        }
 
         let chunk = match self.client.get_chunk(task.task_id).await {
             Ok(chunk) => chunk,
@@ -207,12 +206,15 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             GetChunkResponse::HealthCheck => {
                 self.run_health_check().await?;
                 state.reset_task();
+
                 Ok(Step::Continue)
             }
             GetChunkResponse::CrackerUpdate => {
                 tracing::info!("cracker update requested");
-                state.task_change = true;
+
+                state.invalidate_setup();
                 state.reset_task();
+
                 Ok(Step::Sleep(RETRY_DELAY))
             }
             GetChunkResponse::KeyspaceRequired => {
@@ -232,6 +234,7 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                 if chunk.length == 0 {
                     tracing::error!("invalid chunk size (0) retrieved; retrying");
                     state.reset_task();
+
                     return Ok(Step::Sleep(RETRY_DELAY));
                 }
 
@@ -245,9 +248,11 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                     Ok(outcome) => {
                         if outcome.stopped {
                             state.reset_task();
-                            state.task_change = true;
+                            state.invalidate_setup();
                         }
+
                         self.maybe_check_version().await;
+
                         Ok(Step::Continue)
                     }
                     Err(error) => {
@@ -256,7 +261,9 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                             .client
                             .client_error(task.task_id, Some(chunk.id), error.to_string())
                             .await;
+
                         state.reset_task();
+
                         Ok(Step::Continue)
                     }
                 }

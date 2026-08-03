@@ -68,6 +68,7 @@ pub trait Provisioner<T: Transport> {
     async fn check_client_version(&self, client: &Client<T>) -> Result<(), ProvisionError>;
 }
 
+#[allow(dead_code)]
 pub struct DiskProvisioner<D: Downloader> {
     paths: Paths,
     downloader: D,
