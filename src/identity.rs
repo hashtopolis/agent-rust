@@ -2,11 +2,11 @@ const AGENT_TYPE: &str = "rust";
 const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn agent_type() -> &'static str {
-    return AGENT_TYPE;
+    AGENT_TYPE
 }
 
 pub fn agent_version() -> &'static str {
-    return AGENT_VERSION;
+    AGENT_VERSION
 }
 
 pub fn client_signature() -> String {
