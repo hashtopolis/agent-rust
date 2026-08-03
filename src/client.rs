@@ -26,6 +26,22 @@ pub enum ClientError {
     Protocol(#[from] ProtocolError),
 }
 
+/// A bad token is a plain `ERROR` reply, so this message text is the only way to
+/// tell it apart.
+const INVALID_TOKEN_MESSAGE: &str = "Invalid token!";
+
+impl ClientError {
+    pub fn is_invalid_token(&self) -> bool {
+        matches!(
+            self,
+            ClientError::Server {
+                message: Some(message),
+                ..
+            } if message == INVALID_TOKEN_MESSAGE
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Client<T: Transport> {
     transport: T,
@@ -45,10 +61,6 @@ impl<T: Transport> Client<T> {
             transport,
             token: token.into(),
         }
-    }
-
-    pub fn set_token(&mut self, token: impl Into<String>) {
-        self.token = token.into();
     }
 
     pub fn token(&self) -> &str {

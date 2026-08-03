@@ -23,17 +23,24 @@ Crude, first-pass architecture for the Rust rewrite of the Hashtopolis agent.
 ```
 src/
   main.rs          # CLI entry point (clap)
-  lib.rs           # crate root, wiring
+  lib.rs           # crate root, module list
 
-  agent.rs         # main loop + task/chunk dispatch / state machine
-  cracker.rs       # Cracker trait + factory (chooses backend)
-  transport.rs     # low-level HTTP: Transport trait, reqwest impl
+  agent/
+    mod.rs         # AgentError, Session, Agent struct, bootstrap, deregister
+    run.rs         # the work loop: Step, LoopState, run/tick, shutdown signal
+    progress.rs    # ClientSink: adapts Client into the backends' ProgressSink
+
+  cli.rs           # clap argument parser -> config Overrides
   client.rs        # typed server API: getFileStatus, getTask, getChunk, ...
   config.rs        # typesafe config
-  sysinfo.rs       # OS + device inventory
+  cracker.rs       # Cracker trait + factory (chooses backend)
+  download.rs      # Downloader trait + reqwest impl: url -> file on disk
+  identity.rs      # agent type, version and client signature
   process.rs       # process helpers, stdio stream handling / reporting
+  provisioner.rs   # Provisioner trait + DiskProvisioner: assets onto disk
+  sysinfo.rs       # OS + device inventory
+  transport.rs     # low-level HTTP: Transport trait, reqwest impl
   update.rs        # self-update machinery
-  assets.rs        # helper binaries (uftpd?)
 
   model/
     mod.rs         # domain types: task assignment, Chunk, response types, ...
@@ -52,24 +59,31 @@ src/
       status.rs    # generic status parser
 
 tests/
+  agent/           # integration tests for bootstrap, deregister and the loop
   client/          # integration tests for client against a mock Transport
 ```
 
 ## Module responsibilities
 
-- **agent.rs** — orchestrator. Owns the run loop, asks `client` for work, dispatches tasks/chunks to a backend via the `Cracker` trait, reports progress. Holds the state machine.
+- **agent/** — orchestrator, split so the startup path and the steady-state loop stay separable:
+  - **agent/mod.rs** — `AgentError`, the retry macro, `Session`, the `Agent` struct and its startup path (`bootstrap`, token resolution, registration, directory creation), plus `deregister`.
+  - **agent/run.rs** — the run loop, in a second `impl Agent` block. Asks `client` for work, dispatches tasks/chunks to a backend via the `Cracker` trait, reports progress, holds the state machine. `tick` performs one iteration and returns a `Step` (continue / sleep / shutdown) instead of sleeping itself, so `run` owns all timing and the shutdown signal and the loop stays testable.
+  - **agent/progress.rs** — `ClientSink`, which adapts the `Client` into the `ProgressSink` the backends report through.
+- **cli.rs** — clap argument parser; maps flags to config `Overrides`.
 - **cracker.rs** — defines the `Cracker` trait and a factory that selects the hashcat or generic backend.
+- **provisioner.rs** — the `Provisioner` trait plus its on-disk implementation. Everything the `Client` does not cover: crackers, preprocessors, task files, hashlists and founds fetched and placed where the backend expects them. A trait so the loop can run against a fake. The associated `Cracker` type lets that fake hand the loop a fake cracker.
+- **download.rs** — the `Downloader` trait and its reqwest implementation: a url streamed to a path. Separate from `transport.rs` because the JSON API is one POST endpoint while assets are GETs against arbitrary urls with no useful request timeout.
+- **identity.rs** — what this build calls itself: agent type, version, and the `clientSignature` sent on login.
 - **backend/** — one submodule per supported binary. Each owns its own status parser and binary-specific helpers (keyspace calc, command building).
 - **model/** — core domain types shared across modules (`TaskAssignment`, `Chunk`, response types, etc.) plus the wire layer they are decoded from:
   - **model/raw.rs** — serde-serializable wire DTOs for every server request/response and action: exactly what goes over the wire, before any interpretation.
   - **model/convert.rs** — translation between `raw` and the domain types
 - **transport.rs** — low-level HTTP: the `Transport` trait (one `post_json` call) and its reqwest implementation.
 - **client.rs** — typed, high-level API over `Transport` (`getFileStatus`, `getTask`, `getChunk`, ...). No raw JSON leaks past this layer. Integration-tested in `tests/client/` against a mock `Transport`. Is allowed to use `model::raw` module 
-- **config.rs** — typesafe config, no string-keyed lookups.
+- **config.rs** — typesafe config, no string-keyed lookups. Two files with distinct owners: `config.toml` holds the user's settings and is **only ever read** by the agent (so it is safe to re-read every loop iteration, and hand edits and comments survive); `state.json` is agent-owned and holds the token and uuid, rewritten atomically when either changes. CLI flags live in `Overrides`, applied over the settings on load and re-applied after every reload, and are never persisted back.
 - **sysinfo.rs** — OS and device inventory for registration / status reporting.
 - **process.rs** — spawning child processes, streaming stdio, reporting.
 - **update.rs** — self-update. Lower priority; disabled in Docker. No ephemeral state (only files on disk). Reports platform target so the server delivers the correct binary; SHA check before applying (supply-chain).
-- **assets.rs** — management of bundled helper binaries (e.g. uftp).
 
 ## Open questions / notes
 

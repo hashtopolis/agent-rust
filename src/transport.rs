@@ -9,6 +9,14 @@ pub trait Transport {
     async fn post_json(&self, body: &Value) -> Result<Value, TransportError>;
 }
 
+/// Lets the tokenless startup client borrow the transport before the
+/// authenticated client takes ownership of it.
+impl<T: Transport + ?Sized> Transport for &T {
+    async fn post_json(&self, body: &Value) -> Result<Value, TransportError> {
+        (**self).post_json(body).await
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum TransportError {
     #[error("http error: {0}")]
