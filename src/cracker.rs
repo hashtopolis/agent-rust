@@ -47,7 +47,7 @@ pub trait ProgressSink {
     /// Report a cracker error (e.g. a stderr line) without stopping the run.
     /// The server logs it and decides on a later tick whether
     /// to abort the chunk, so delivery failures are swallowed.
-    async fn report_error(&self, message: String);
+    async fn report_error(&self, message: impl Into<String>);
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

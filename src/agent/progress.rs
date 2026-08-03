@@ -39,7 +39,7 @@ impl<T: Transport> ProgressSink for ClientSink<'_, T> {
         }
     }
 
-    async fn report_error(&self, message: String) {
+    async fn report_error(&self, message: impl Into<String>) {
         let response = self
             .client
             .client_error(self.task_id, Some(self.chunk_id), message)

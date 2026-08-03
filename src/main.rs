@@ -37,6 +37,7 @@ fn init_logging(debug: bool) {
 
 async fn run(cli: Cli) -> Result<()> {
     let config = Config::load(&cli.config, &cli.state, cli.overrides())?;
+
     let url = config.require_url()?;
     let transport = HttpTransport::new(url).context("building the HTTP transport")?;
 
