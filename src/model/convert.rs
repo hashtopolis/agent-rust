@@ -14,16 +14,6 @@ pub enum ProtocolError {
     MissingField(&'static str),
 }
 
-trait Require<T> {
-    fn require(self, field: &'static str) -> Result<T, ProtocolError>;
-}
-
-impl<T> Require<T> for Option<T> {
-    fn require(self, field: &'static str) -> Result<T, ProtocolError> {
-        self.ok_or(ProtocolError::MissingField(field))
-    }
-}
-
 /// Classifies `taskId` field in a `getTask` reply:
 /// - absent means no task,
 /// - `-1` means a health check
@@ -81,7 +71,7 @@ impl TryFrom<raw::RegisterResponse> for model::RegisterResponse {
 
     fn try_from(raw: raw::RegisterResponse) -> Result<Self, Self::Error> {
         Ok(model::RegisterResponse {
-            token: raw.token.require("token")?,
+            token: raw.token.ok_or(ProtocolError::MissingField("token"))?,
         })
     }
 }
@@ -91,9 +81,13 @@ impl TryFrom<raw::LoginResponse> for model::LoginResponse {
 
     fn try_from(raw: raw::LoginResponse) -> Result<Self, Self::Error> {
         Ok(model::LoginResponse {
-            timeout: raw.timeout.require("timeout")?,
-            multicast_enabled: raw.multicast_enabled.require("multicastEnabled")?,
-            server_version: raw.server_version.require("server-version")?,
+            timeout: raw.timeout.ok_or(ProtocolError::MissingField("timeout"))?,
+            multicast_enabled: raw
+                .multicast_enabled
+                .ok_or(ProtocolError::MissingField("multicastEnabled"))?,
+            server_version: raw
+                .server_version
+                .ok_or(ProtocolError::MissingField("server-version"))?,
         })
     }
 }
@@ -102,10 +96,10 @@ impl TryFrom<raw::CheckClientVersionResponse> for model::CheckClientVersionRespo
     type Error = ProtocolError;
 
     fn try_from(raw: raw::CheckClientVersionResponse) -> Result<Self, Self::Error> {
-        match raw.version.require("version")? {
+        match raw.version.ok_or(ProtocolError::MissingField("version"))? {
             UpdateVersion::UpToDate => Ok(model::CheckClientVersionResponse::UpToDate),
             UpdateVersion::NewVersion => Ok(model::CheckClientVersionResponse::NewVersion {
-                url: raw.url.require("url")?,
+                url: raw.url.ok_or(ProtocolError::MissingField("url"))?,
             }),
         }
     }
@@ -116,7 +110,9 @@ impl TryFrom<raw::DownloadBinaryResponse> for model::DownloadUtilityResponse {
 
     fn try_from(raw: raw::DownloadBinaryResponse) -> Result<Self, Self::Error> {
         Ok(model::DownloadUtilityResponse {
-            url: raw.executable.require("executable")?,
+            url: raw
+                .executable
+                .ok_or(ProtocolError::MissingField("executable"))?,
         })
     }
 }
@@ -126,9 +122,11 @@ impl TryFrom<raw::DownloadBinaryResponse> for model::DownloadCrackerResponse {
 
     fn try_from(raw: raw::DownloadBinaryResponse) -> Result<Self, Self::Error> {
         Ok(model::DownloadCrackerResponse {
-            url: raw.url.require("url")?,
-            name: raw.name.require("name")?,
-            binary: raw.executable.require("executable")?,
+            url: raw.url.ok_or(ProtocolError::MissingField("url"))?,
+            name: raw.name.ok_or(ProtocolError::MissingField("name"))?,
+            binary: raw
+                .executable
+                .ok_or(ProtocolError::MissingField("executable"))?,
         })
     }
 }
@@ -138,9 +136,11 @@ impl TryFrom<raw::DownloadBinaryResponse> for model::DownloadPreprocessorRespons
 
     fn try_from(raw: raw::DownloadBinaryResponse) -> Result<Self, Self::Error> {
         Ok(model::DownloadPreprocessorResponse {
-            url: raw.url.require("url")?,
-            name: raw.name.require("name")?,
-            binary: raw.executable.require("executable")?,
+            url: raw.url.ok_or(ProtocolError::MissingField("url"))?,
+            name: raw.name.ok_or(ProtocolError::MissingField("name"))?,
+            binary: raw
+                .executable
+                .ok_or(ProtocolError::MissingField("executable"))?,
             keyspace_command: raw.keyspace_command,
             skip_command: raw.skip_command,
             limit_command: raw.limit_command,
@@ -169,10 +169,18 @@ impl TryFrom<raw::GetTaskResponse> for model::GetTaskResponse {
 
         let brain = if raw.use_brain {
             Some(BrainConfig {
-                host: raw.brain_host.require("brainHost")?,
-                port: raw.brain_port.require("brainPort")?,
-                pass: raw.brain_pass.require("brainPass")?,
-                features: raw.brain_features.require("brainFeatures")?,
+                host: raw
+                    .brain_host
+                    .ok_or(ProtocolError::MissingField("brainHost"))?,
+                port: raw
+                    .brain_port
+                    .ok_or(ProtocolError::MissingField("brainPort"))?,
+                pass: raw
+                    .brain_pass
+                    .ok_or(ProtocolError::MissingField("brainPass"))?,
+                features: raw
+                    .brain_features
+                    .ok_or(ProtocolError::MissingField("brainFeatures"))?,
             })
         } else {
             None
@@ -180,19 +188,33 @@ impl TryFrom<raw::GetTaskResponse> for model::GetTaskResponse {
 
         Ok(model::GetTaskResponse::Task(Box::new(TaskAssignment {
             task_id,
-            cracker_id: raw.cracker_id.require("crackerId")?,
-            attack_command: raw.attack_command.require("attackcmd")?,
-            cmd_parameters: raw.cmd_parameters.require("cmdpars")?,
-            hashlist_id: raw.hashlist_id.require("hashlistId")?,
-            benchmark: raw.benchmark.require("bench")?,
-            status_timer: raw.status_timer.require("statustimer")?,
+            cracker_id: raw
+                .cracker_id
+                .ok_or(ProtocolError::MissingField("crackerId"))?,
+            attack_command: raw
+                .attack_command
+                .ok_or(ProtocolError::MissingField("attackcmd"))?,
+            cmd_parameters: raw
+                .cmd_parameters
+                .ok_or(ProtocolError::MissingField("cmdpars"))?,
+            hashlist_id: raw
+                .hashlist_id
+                .ok_or(ProtocolError::MissingField("hashlistId"))?,
+            benchmark: raw.benchmark.ok_or(ProtocolError::MissingField("bench"))?,
+            status_timer: raw
+                .status_timer
+                .ok_or(ProtocolError::MissingField("statustimer"))?,
             files: raw.files,
             bench_type: raw
                 .bench_type
                 .map(model::BenchmarkType::from)
-                .require("benchType")?,
-            hashlist_alias: raw.hashlist_alias.require("hashlistAlias")?,
-            keyspace: raw.keyspace.require("keyspace")?,
+                .ok_or(ProtocolError::MissingField("benchType"))?,
+            hashlist_alias: raw
+                .hashlist_alias
+                .ok_or(ProtocolError::MissingField("hashlistAlias"))?,
+            keyspace: raw
+                .keyspace
+                .ok_or(ProtocolError::MissingField("keyspace"))?,
             enforce_pipe: raw.enforce_pipe,
             slow_hash: raw.slow_hash,
             preprocessor,
@@ -207,9 +229,9 @@ impl TryFrom<raw::GetChunkResponse> for model::GetChunkResponse {
     fn try_from(raw: raw::GetChunkResponse) -> Result<Self, Self::Error> {
         Ok(match raw.status {
             ChunkStatus::Ok => model::GetChunkResponse::Chunk(Chunk {
-                id: raw.chunk_id.require("chunkId")?,
-                skip: raw.skip.require("skip")?,
-                length: raw.length.require("length")?,
+                id: raw.chunk_id.ok_or(ProtocolError::MissingField("chunkId"))?,
+                skip: raw.skip.ok_or(ProtocolError::MissingField("skip"))?,
+                length: raw.length.ok_or(ProtocolError::MissingField("length"))?,
             }),
             ChunkStatus::KeyspaceRequired => model::GetChunkResponse::KeyspaceRequired,
             ChunkStatus::BenchmarkRequired => model::GetChunkResponse::BenchmarkRequired,
@@ -242,10 +264,16 @@ impl TryFrom<raw::GetFileResponse> for model::GetFileResponse {
 
     fn try_from(raw: raw::GetFileResponse) -> Result<Self, Self::Error> {
         Ok(model::GetFileResponse {
-            filename: raw.filename.require("filename")?,
-            extension: raw.extension.require("extension")?,
-            url: raw.url.require("url")?,
-            filesize: raw.filesize.require("filesize")?,
+            filename: raw
+                .filename
+                .ok_or(ProtocolError::MissingField("filename"))?,
+            extension: raw
+                .extension
+                .ok_or(ProtocolError::MissingField("extension"))?,
+            url: raw.url.ok_or(ProtocolError::MissingField("url"))?,
+            filesize: raw
+                .filesize
+                .ok_or(ProtocolError::MissingField("filesize"))?,
         })
     }
 }
@@ -263,7 +291,7 @@ impl TryFrom<raw::GetHashlistResponse> for model::GetHashlistResponse {
 
     fn try_from(raw: raw::GetHashlistResponse) -> Result<Self, Self::Error> {
         Ok(model::GetHashlistResponse {
-            url: raw.url.require("url")?,
+            url: raw.url.ok_or(ProtocolError::MissingField("url"))?,
         })
     }
 }
@@ -273,7 +301,7 @@ impl TryFrom<raw::GetFoundResponse> for model::GetFoundResponse {
 
     fn try_from(raw: raw::GetFoundResponse) -> Result<Self, Self::Error> {
         Ok(model::GetFoundResponse {
-            url: raw.url.require("url")?,
+            url: raw.url.ok_or(ProtocolError::MissingField("url"))?,
         })
     }
 }
@@ -283,11 +311,15 @@ impl TryFrom<raw::GetHealthCheckResponse> for model::GetHealthCheckResponse {
 
     fn try_from(raw: raw::GetHealthCheckResponse) -> Result<Self, Self::Error> {
         Ok(model::GetHealthCheckResponse {
-            attack: raw.attack.require("attack")?,
-            cracker_binary_id: raw.cracker_binary_id.require("crackerBinaryId")?,
+            attack: raw.attack.ok_or(ProtocolError::MissingField("attack"))?,
+            cracker_binary_id: raw
+                .cracker_binary_id
+                .ok_or(ProtocolError::MissingField("crackerBinaryId"))?,
             hashes: raw.hashes,
-            check_id: raw.check_id.require("checkId")?,
-            hashlist_alias: raw.hashlist_alias.require("hashlistAlias")?,
+            check_id: raw.check_id.ok_or(ProtocolError::MissingField("checkId"))?,
+            hashlist_alias: raw
+                .hashlist_alias
+                .ok_or(ProtocolError::MissingField("hashlistAlias"))?,
         })
     }
 }
