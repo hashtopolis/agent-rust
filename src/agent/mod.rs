@@ -96,6 +96,15 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
         let token = resolve_token(&transport, &mut config).await?;
         let client = Client::with_token(transport, token);
 
+        let login_result = retry!("login", client.login(client_signature()))?;
+        tracing::info!(
+            server_version = %login_result.server_version,
+            timeout = login_result.timeout,
+            "login successful"
+        );
+
+        // Shutdown on failure (exit process)
+
         let uuid = config.uuid_or_create()?.to_string();
         let settings = config.settings();
 
@@ -108,13 +117,6 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             "updateInformation",
             client.update_information(&uuid, &devices)
         )?;
-
-        let login_result = retry!("login", client.login(client_signature()))?;
-        tracing::info!(
-            server_version = %login_result.server_version,
-            timeout = login_result.timeout,
-            "login successful"
-        );
 
         Self::create_file_paths(&settings.paths)?;
 
