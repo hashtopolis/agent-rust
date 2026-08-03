@@ -1,4 +1,4 @@
-//! Configuration split over two files with different owners: `config.toml` is
+//! Configuration split over two files with different owners: `config.json` is
 //! user-owned and only ever read (so it is safe to reload every loop iteration),
 //! while `state.json` is agent-owned and rewritten when the token or uuid change.
 
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const DEFAULT_SETTINGS_FILE: &str = "config.toml";
+pub const DEFAULT_SETTINGS_FILE: &str = "config.json";
 pub const DEFAULT_STATE_FILE: &str = "state.json";
 
 #[derive(Debug, Error)]
@@ -33,12 +33,6 @@ pub enum ConfigError {
         path: PathBuf,
         #[source]
         source: io::Error,
-    },
-    #[error("invalid TOML in {}: {source}", path.display())]
-    Toml {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
     },
     #[error("invalid JSON in {}: {source}", path.display())]
     Json {
@@ -343,7 +337,7 @@ fn read_settings(path: &Path) -> Result<Settings, ConfigError> {
     let Some(contents) = read_optional(path)? else {
         return Ok(Settings::default());
     };
-    toml::from_str(&contents).map_err(|source| ConfigError::Toml {
+    serde_json::from_str(&contents).map_err(|source| ConfigError::Json {
         path: path.to_path_buf(),
         source,
     })
@@ -426,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_round_trip_through_toml() {
+    fn settings_round_trip_through_json() {
         let settings = Settings {
             server: Server {
                 url: Some("https://example.com/api/server.php".to_string()),
@@ -451,8 +445,8 @@ mod tests {
             },
         };
 
-        let encoded = toml::to_string(&settings).unwrap();
-        let decoded: Settings = toml::from_str(&encoded).unwrap();
+        let encoded = serde_json::to_string_pretty(&settings).unwrap();
+        let decoded: Settings = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, settings);
     }
@@ -461,10 +455,7 @@ mod tests {
     fn partial_settings_file_keeps_defaults_for_the_rest() {
         let fixture = Fixture::new();
         fixture.write_settings(
-            r#"
-            [server]
-            url = "https://example.com/api/server.php"
-            "#,
+            r#"{ "server": { "url": "https://example.com/api/server.php" } }"#,
         );
 
         let config = fixture.load(Overrides::default()).unwrap();
@@ -484,18 +475,13 @@ mod tests {
     #[test]
     fn unknown_settings_key_is_rejected() {
         let fixture = Fixture::new();
-        fixture.write_settings(
-            r#"
-            [server]
-            urls = "typo"
-            "#,
-        );
+        fixture.write_settings(r#"{ "server": { "urls": "typo" } }"#);
 
         let error = fixture.load(Overrides::default()).unwrap_err();
 
         assert!(
-            matches!(error, ConfigError::Toml { .. }),
-            "expected a TOML error, got {error:?}"
+            matches!(error, ConfigError::Json { .. }),
+            "expected a JSON error, got {error:?}"
         );
     }
 
@@ -503,13 +489,10 @@ mod tests {
     fn overrides_win_over_the_file() {
         let fixture = Fixture::new();
         fixture.write_settings(
-            r#"
-            [server]
-            url = "https://from-file.example/api/server.php"
-
-            [behavior]
-            cpu_only = false
-            "#,
+            r#"{
+                "server": { "url": "https://from-file.example/api/server.php" },
+                "behavior": { "cpu_only": false }
+            }"#,
         );
 
         let config = fixture
@@ -536,10 +519,7 @@ mod tests {
     fn overrides_are_reapplied_after_reload() {
         let fixture = Fixture::new();
         fixture.write_settings(
-            r#"
-            [server]
-            url = "https://from-file.example/api/server.php"
-            "#,
+            r#"{ "server": { "url": "https://from-file.example/api/server.php" } }"#,
         );
         let mut config = fixture
             .load(Overrides {
@@ -549,13 +529,10 @@ mod tests {
             .unwrap();
 
         fixture.write_settings(
-            r#"
-            [server]
-            url = "https://edited.example/api/server.php"
-
-            [behavior]
-            piping_threshold = 42
-            "#,
+            r#"{
+                "server": { "url": "https://edited.example/api/server.php" },
+                "behavior": { "piping_threshold": 42 }
+            }"#,
         );
         config.reload_settings().unwrap();
 
@@ -573,7 +550,8 @@ mod tests {
         let mut config = fixture.load(Overrides::default()).unwrap();
         config.set_token("GHhgdf(/&").unwrap();
 
-        fixture.write_settings("[server]\nurl = \"https://example.com/api/server.php\"\n");
+        fixture
+            .write_settings(r#"{ "server": { "url": "https://example.com/api/server.php" } }"#);
         config.reload_settings().unwrap();
 
         assert_eq!(config.token(), Some("GHhgdf(/&"));
@@ -645,7 +623,7 @@ mod tests {
     #[test]
     fn empty_url_counts_as_missing() {
         let fixture = Fixture::new();
-        fixture.write_settings("[server]\nurl = \"\"\n");
+        fixture.write_settings(r#"{ "server": { "url": "" } }"#);
 
         let config = fixture.load(Overrides::default()).unwrap();
 

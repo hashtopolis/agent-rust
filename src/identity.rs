@@ -1,5 +1,4 @@
 const AGENT_TYPE: &str = "rust";
-
 const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn agent_type() -> &'static str {

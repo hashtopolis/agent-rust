@@ -80,7 +80,7 @@ tests/
   - **model/convert.rs** — translation between `raw` and the domain types
 - **transport.rs** — low-level HTTP: the `Transport` trait (one `post_json` call) and its reqwest implementation.
 - **client.rs** — typed, high-level API over `Transport` (`getFileStatus`, `getTask`, `getChunk`, ...). No raw JSON leaks past this layer. Integration-tested in `tests/client/` against a mock `Transport`. Is allowed to use `model::raw` module 
-- **config.rs** — typesafe config, no string-keyed lookups. Two files with distinct owners: `config.toml` holds the user's settings and is **only ever read** by the agent (so it is safe to re-read every loop iteration, and hand edits and comments survive); `state.json` is agent-owned and holds the token and uuid, rewritten atomically when either changes. CLI flags live in `Overrides`, applied over the settings on load and re-applied after every reload, and are never persisted back.
+- **config.rs** — typesafe config, no string-keyed lookups. Two files with distinct owners: `config.json` holds the user's settings and is **only ever read** by the agent (so it is safe to re-read every loop iteration, and hand edits survive); `state.json` is agent-owned and holds the token and uuid, rewritten atomically when either changes. CLI flags live in `Overrides`, applied over the settings on load and re-applied after every reload, and are never persisted back.
 - **sysinfo.rs** — OS and device inventory for registration / status reporting.
 - **process.rs** — spawning child processes, streaming stdio, reporting.
 - **update.rs** — self-update. Lower priority; disabled in Docker. No ephemeral state (only files on disk). Reports platform target so the server delivers the correct binary; SHA check before applying (supply-chain).
