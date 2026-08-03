@@ -150,12 +150,19 @@ async fn send_progress_returns_continue() {
 }
 
 #[tokio::test]
-async fn send_progress_error() {
+async fn send_progress_error_reply_is_a_rejection() {
     let client = mock_client_returning(error_reply("sendProgress"));
 
-    assert_server_error(
-        client.send_progress(ProgressReport::default()).await,
-        "sendProgress",
+    let res = client
+        .send_progress(ProgressReport::default())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res,
+        SendProgressResponse::Rejected {
+            reason: Some("boom".to_string())
+        }
     );
 }
 

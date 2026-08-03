@@ -26,12 +26,28 @@ pub enum ProgressCommand {
         zaps: Vec<String>,
     },
     Stop,
-    /// The report could not be delivered; the backend should keep going.
-    Failed,
 }
 
+/// The report never reached the server (unreachable, timed out, unparsable
+/// reply). It is not a `CrackerError`: the backend must retain the unsent state
+/// (cracks, progress) and resend it on the next update, not abort the run.
+#[derive(Debug, Clone, Error)]
+#[error("progress update could not be delivered: {0}")]
+pub struct ProgressUpdateError(pub String);
+
 pub trait ProgressSink {
-    async fn send_progress(&self, report: ProgressReport) -> ProgressCommand;
+    /// `Err` is a delivery failure, not a reason to stop: the cracker backend keeps the
+    /// unsent state and retries on the next update. A chunk stops only on an
+    /// explicit `Stop` or a genuine local process fault (`CrackerError`).
+    async fn send_progress(
+        &self,
+        report: ProgressReport,
+    ) -> Result<ProgressCommand, ProgressUpdateError>;
+
+    /// Report a cracker error (e.g. a stderr line) without stopping the run.
+    /// The server logs it and decides on a later tick whether
+    /// to abort the chunk, so delivery failures are swallowed.
+    async fn report_error(&self, message: String);
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

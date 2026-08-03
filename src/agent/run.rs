@@ -237,6 +237,8 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
 
                 let sink = ClientSink {
                     client: &self.client,
+                    task_id: task.task_id,
+                    chunk_id: chunk.id,
                 };
 
                 match cracker.run_chunk(&task, chunk, &sink).await {
@@ -252,7 +254,7 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                         tracing::error!(%error, "chunk run failed");
                         let _ = self
                             .client
-                            .client_error(task.task_id, None, error.to_string())
+                            .client_error(task.task_id, Some(chunk.id), error.to_string())
                             .await;
                         state.reset_task();
                         Ok(Step::Continue)
@@ -298,7 +300,15 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
         task: &TaskAssignment,
         cracker: &impl Cracker,
     ) -> Result<(), AgentError> {
-        let keyspace = cracker.measure_keyspace(task).await?;
+        let keyspace = match cracker.measure_keyspace(task).await {
+            Ok(keyspace) => keyspace,
+            Err(error) => {
+                self.report_task_error(task.task_id, "Keyspace measure failed!")
+                    .await;
+
+                return Err(error.into());
+            }
+        };
         state.measured_keyspace = Some(keyspace);
 
         self.client
@@ -340,19 +350,25 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             }
             Ok(None) => {
                 tracing::error!("benchmark produced no result");
+                self.report_task_error(task.task_id, "Benchmark produced no result!")
+                    .await;
                 state.reset_task();
                 Ok(Step::Sleep(BENCH_FAIL_DELAY))
             }
             Err(error) => {
                 tracing::error!(%error, "benchmark failed");
+                self.report_task_error(task.task_id, format!("Benchmark failed! {error}"))
+                    .await;
                 state.reset_task();
                 Ok(Step::Sleep(BENCH_FAIL_DELAY))
             }
         }
     }
 
-    /// Failures are logged and swallowed so the loop moves on; only a rejected
-    /// token is fatal.
+    async fn report_task_error(&self, task_id: u64, message: impl Into<String>) {
+        let _ = self.client.client_error(task_id, None, message).await;
+    }
+
     async fn run_health_check(&self) -> Result<(), AgentError> {
         tracing::info!("health check requested by server");
 

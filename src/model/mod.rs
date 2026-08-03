@@ -168,6 +168,12 @@ pub enum SendProgressResponse {
         cracked: u64,
         skipped: u64,
     },
+    /// The server refused the update with an `ERROR` envelope (chunk aborted,
+    /// manually interrupted, agent inactive, ...). An expected control-flow
+    /// outcome for `sendProgress`, not a failure to reach the server.
+    Rejected {
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

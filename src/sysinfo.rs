@@ -11,6 +11,8 @@ pub fn hostname() -> String {
 }
 
 pub fn collect_devices(configured: Option<&[String]>, _cpu_only: bool) -> Vec<String> {
+    // lspci -- gather opencl capable devices, check https://docs.rs/opencl3/latest/opencl3/device/index.html
+    // check macos (opencl device cpu/gpu)
     match configured {
         Some(devices) if !devices.is_empty() => devices.to_vec(),
         _ => {

@@ -267,7 +267,7 @@ impl<T: Transport> Client<T> {
         &self,
         report: ProgressReport,
     ) -> Result<SendProgressResponse, ClientError> {
-        let raw: raw::SendProgressResponse = self
+        let result: Result<raw::SendProgressResponse, ClientError> = self
             .call(
                 "sendProgress",
                 Request::SendProgress {
@@ -284,8 +284,19 @@ impl<T: Transport> Client<T> {
                     cpu_util: report.cpu_util,
                 },
             )
-            .await?;
-        Ok(SendProgressResponse::from(raw))
+            .await;
+
+        match result {
+            Ok(raw) => Ok(SendProgressResponse::from(raw)),
+
+            // The server signals "stop this chunk" with an ERROR envelope, so a
+            // server-level rejection is an expected outcome here, not a failure
+            // to reach the server. Only transport/codec errors stay `Err`.
+            Err(ClientError::Server { message, .. }) => {
+                Ok(SendProgressResponse::Rejected { reason: message })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn client_error(

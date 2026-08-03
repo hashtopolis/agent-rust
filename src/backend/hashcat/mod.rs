@@ -41,6 +41,14 @@ impl Cracker for HashcatCracker {
         _chunk: Chunk,
         _sink: &S,
     ) -> Result<ChunkOutcome, CrackerError> {
+        // spawn hashcat (own process group), then 3 watcher tasks feeding one
+        // mpsc channel of:
+        //   enum Event { StatusUpdate(HashcatStatus), Debug(String), Stderr(String), Crack(Vec<String>) }
+        // stdout -> StatusUpdate/Debug, stderr -> sink.report_error (never kills),
+        // outfile tail -> Crack. Run loop select!s over that channel + a keepalive
+        // interval (until first status). On StatusUpdate: drain cracks in <=1000 batches via
+        // sink.send_progress; Continue -> write zaps, Stop -> kill + stopped, Err -> keep
+        // batch and retry. Channel close == process exit.
         todo!("hashcat chunk run")
     }
 
