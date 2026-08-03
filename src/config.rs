@@ -454,9 +454,7 @@ mod tests {
     #[test]
     fn partial_settings_file_keeps_defaults_for_the_rest() {
         let fixture = Fixture::new();
-        fixture.write_settings(
-            r#"{ "server": { "url": "https://example.com/api/server.php" } }"#,
-        );
+        fixture.write_settings(r#"{ "server": { "url": "https://example.com/api/server.php" } }"#);
 
         let config = fixture.load(Overrides::default()).unwrap();
 
@@ -550,8 +548,7 @@ mod tests {
         let mut config = fixture.load(Overrides::default()).unwrap();
         config.set_token("GHhgdf(/&").unwrap();
 
-        fixture
-            .write_settings(r#"{ "server": { "url": "https://example.com/api/server.php" } }"#);
+        fixture.write_settings(r#"{ "server": { "url": "https://example.com/api/server.php" } }"#);
         config.reload_settings().unwrap();
 
         assert_eq!(config.token(), Some("GHhgdf(/&"));

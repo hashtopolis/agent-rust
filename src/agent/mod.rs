@@ -45,22 +45,23 @@ impl AgentError {
 }
 
 /// Retry a client call, sleeping between transport failures; a rejected token is
-/// fatal and any other server error propagates. A macro, not a function, so
-/// `$call` is re-evaluated into a fresh future each attempt.
-macro_rules! retry {
-    ($action:expr, $call:expr) => {{
-        loop {
-            match $call.await {
-                Ok(value) => break Ok(value),
-                Err(error) if error.is_invalid_token() => break Err(AgentError::TokenRejected),
-                Err(ClientError::Transport(error)) => {
-                    tracing::warn!(action = $action, %error, "request failed; retrying");
-                    sleep(RETRY_DELAY).await;
-                }
-                Err(error) => break Err(AgentError::client(error)),
+/// fatal and any other server error propagates. `call` manufactures a fresh
+/// future for each attempt.
+async fn with_retry<T, Fut>(mut call: impl FnMut() -> Fut) -> Result<T, AgentError>
+where
+    Fut: Future<Output = Result<T, ClientError>>,
+{
+    loop {
+        match call().await {
+            Ok(value) => return Ok(value),
+            Err(error) if error.is_invalid_token() => return Err(AgentError::TokenRejected),
+            Err(error @ ClientError::Transport { .. }) => {
+                tracing::warn!(%error, "request failed; retrying");
+                sleep(RETRY_DELAY).await;
             }
+            Err(error) => return Err(AgentError::client(error)),
         }
-    }};
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -96,7 +97,7 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
         let token = resolve_token(&transport, &mut config).await?;
         let client = Client::with_token(transport, token);
 
-        let login_result = retry!("login", client.login(client_signature()))?;
+        let login_result = with_retry(|| client.login(client_signature())).await?;
         tracing::info!(
             server_version = %login_result.server_version,
             timeout = login_result.timeout,
@@ -113,10 +114,7 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             settings.behavior.cpu_only,
         );
 
-        retry!(
-            "updateInformation",
-            client.update_information(&uuid, &devices)
-        )?;
+        with_retry(|| client.update_information(&uuid, &devices)).await?;
 
         Self::create_file_paths(&settings.paths)?;
 
@@ -153,7 +151,7 @@ async fn resolve_token<T: Transport>(
     config: &mut Config,
 ) -> Result<String, AgentError> {
     let probe = Client::new(transport);
-    retry!("testConnection", probe.test_connection())?;
+    with_retry(|| probe.test_connection()).await?;
 
     if let Some(token) = config.token() {
         tracing::info!("using stored token");
@@ -170,10 +168,8 @@ async fn resolve_token<T: Transport>(
         .unwrap_or_else(sysinfo::hostname);
     let cpu_only = config.settings().behavior.cpu_only.then_some(true);
 
-    let registered = retry!(
-        "register",
-        probe.register(voucher.as_str(), name.as_str(), cpu_only)
-    )?;
+    let registered =
+        with_retry(|| probe.register(voucher.as_str(), name.as_str(), cpu_only)).await?;
 
     config.set_token(registered.token.as_str())?;
     tracing::info!("registered successfully");

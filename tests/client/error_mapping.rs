@@ -28,7 +28,10 @@ async fn transport_failure_maps_to_transport_error() {
 
     assert!(matches!(
         err,
-        ClientError::Transport(TransportError::Status(500))
+        ClientError::Transport {
+            action: "getTask",
+            source: TransportError::Status(500)
+        }
     ));
 }
 

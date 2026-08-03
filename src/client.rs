@@ -13,8 +13,12 @@ use crate::transport::{Transport, TransportError};
 
 #[derive(Debug, Error)]
 pub enum ClientError {
-    #[error("transport error: {0}")]
-    Transport(#[from] TransportError),
+    #[error("transport error on '{action}': {source}")]
+    Transport {
+        action: &'static str,
+        #[source]
+        source: TransportError,
+    },
     #[error("server error on '{action}'{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
     Server {
         action: &'static str,
@@ -429,7 +433,11 @@ impl<T: Transport> Client<T> {
         request: Request,
     ) -> Result<R, ClientError> {
         let body = serde_json::to_value(&request)?;
-        let value = self.transport.post_json(&body).await?;
+        let value = self
+            .transport
+            .post_json(&body)
+            .await
+            .map_err(|source| ClientError::Transport { action, source })?;
         match serde_json::from_value::<raw::Reply<R>>(value)? {
             raw::Reply::Success(payload) => Ok(payload),
             raw::Reply::Error { message } => Err(ClientError::Server { action, message }),
