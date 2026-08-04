@@ -127,6 +127,10 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
         Ok(Self::new(client, config, provisioner, session))
     }
 
+    pub async fn deregister(self) -> Result<(), AgentError> {
+        deregister(&self.client, &self.config).await
+    }
+
     fn create_file_paths(paths: &Paths) -> Result<(), ConfigError> {
         // Old python agent did not create zaps path
         for dir in [
@@ -177,8 +181,6 @@ async fn resolve_token<T: Transport>(
     Ok(registered.token)
 }
 
-/// Leaves the user's settings file and downloaded data in place, removing only
-/// the agent's identity.
 pub async fn deregister<T: Transport>(
     client: &Client<T>,
     config: &Config,

@@ -7,7 +7,7 @@ use crate::config::{DEFAULT_SETTINGS_FILE, DEFAULT_STATE_FILE, Overrides};
 #[derive(Debug, Parser)]
 #[command(name = "htp-agent", version, about = "Hashtopolis agent (Rust)")]
 pub struct Cli {
-    /// User settings file (TOML). Read only; never written by the agent.
+    /// User settings file (JSON). Read only; never written by the agent.
     #[arg(long, env = "HTP_CONFIG", default_value = DEFAULT_SETTINGS_FILE)]
     pub config: PathBuf,
 
