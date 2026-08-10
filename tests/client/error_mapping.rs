@@ -3,7 +3,7 @@ use htp_agent::model::ProtocolError;
 use htp_agent::transport::TransportError;
 use serde_json::json;
 
-use crate::common::{TOKEN, assert_client_sent_body, mock_client_returning};
+use crate::common::{TOKEN, assert_client_sent_body, error_reply, mock_client_returning};
 use crate::support::transport::{FailingTransport, MockTransport};
 
 #[tokio::test]
@@ -28,7 +28,10 @@ async fn transport_failure_maps_to_transport_error() {
 
     assert!(matches!(
         err,
-        ClientError::Transport(TransportError::Status(500))
+        ClientError::Transport {
+            action: "getTask",
+            source: TransportError::Status(500)
+        }
     ));
 }
 
@@ -66,16 +69,40 @@ async fn malformed_success_payload_maps_to_codec_error() {
 }
 
 #[tokio::test]
-async fn new_token_is_used_after_set_token() {
-    let transport =
-        MockTransport::new(json!({"action": "getTask", "response": "SUCCESS", "taskId": null}));
-    let mut client = Client::new(transport);
-    client.set_token("later-token");
+async fn tokenless_client_can_register() {
+    let transport = MockTransport::new(
+        json!({"action": "register", "response": "SUCCESS", "token": "fresh-token"}),
+    );
+    let client = Client::new(transport);
 
-    client.get_task().await.unwrap();
+    let res = client
+        .register("89GD78tf", "client name", None)
+        .await
+        .unwrap();
 
+    assert_eq!(res.token, "fresh-token");
     assert_client_sent_body(
         &client,
-        json!({"action": "getTask", "token": "later-token"}),
+        json!({"action": "register", "voucher": "89GD78tf", "name": "client name"}),
     );
+}
+
+#[tokio::test]
+async fn invalid_token_error_is_recognised_by_its_message() {
+    let client = mock_client_returning(
+        json!({"action": "getTask", "response": "ERROR", "message": "Invalid token!"}),
+    );
+
+    let err = client.get_task().await.unwrap_err();
+
+    assert!(err.is_invalid_token(), "got {err:?}");
+}
+
+#[tokio::test]
+async fn other_server_errors_are_not_invalid_token() {
+    let client = mock_client_returning(error_reply("getTask"));
+
+    let err = client.get_task().await.unwrap_err();
+
+    assert!(!err.is_invalid_token(), "got {err:?}");
 }

@@ -13,8 +13,12 @@ use crate::transport::{Transport, TransportError};
 
 #[derive(Debug, Error)]
 pub enum ClientError {
-    #[error("transport error: {0}")]
-    Transport(#[from] TransportError),
+    #[error("transport error on '{action}': {source}")]
+    Transport {
+        action: &'static str,
+        #[source]
+        source: TransportError,
+    },
     #[error("server error on '{action}'{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
     Server {
         action: &'static str,
@@ -24,6 +28,22 @@ pub enum ClientError {
     Codec(#[from] serde_json::Error),
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
+}
+
+/// A bad token is a plain `ERROR` reply, so this message text is the only way to
+/// tell it apart.
+const INVALID_TOKEN_MESSAGE: &str = "Invalid token!";
+
+impl ClientError {
+    pub fn is_invalid_token(&self) -> bool {
+        matches!(
+            self,
+            ClientError::Server {
+                message: Some(message),
+                ..
+            } if message == INVALID_TOKEN_MESSAGE
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -45,10 +65,6 @@ impl<T: Transport> Client<T> {
             transport,
             token: token.into(),
         }
-    }
-
-    pub fn set_token(&mut self, token: impl Into<String>) {
-        self.token = token.into();
     }
 
     pub fn token(&self) -> &str {
@@ -255,7 +271,7 @@ impl<T: Transport> Client<T> {
         &self,
         report: ProgressReport,
     ) -> Result<SendProgressResponse, ClientError> {
-        let raw: raw::SendProgressResponse = self
+        let result: Result<raw::SendProgressResponse, ClientError> = self
             .call(
                 "sendProgress",
                 Request::SendProgress {
@@ -272,8 +288,19 @@ impl<T: Transport> Client<T> {
                     cpu_util: report.cpu_util,
                 },
             )
-            .await?;
-        Ok(SendProgressResponse::from(raw))
+            .await;
+
+        match result {
+            Ok(raw) => Ok(SendProgressResponse::from(raw)),
+
+            // The server signals "stop this chunk" with an ERROR envelope, so a
+            // server-level rejection is an expected outcome here, not a failure
+            // to reach the server. Only transport/codec errors stay `Err`.
+            Err(ClientError::Server { message, .. }) => {
+                Ok(SendProgressResponse::Rejected { reason: message })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn client_error(
@@ -406,7 +433,11 @@ impl<T: Transport> Client<T> {
         request: Request,
     ) -> Result<R, ClientError> {
         let body = serde_json::to_value(&request)?;
-        let value = self.transport.post_json(&body).await?;
+        let value = self
+            .transport
+            .post_json(&body)
+            .await
+            .map_err(|source| ClientError::Transport { action, source })?;
         match serde_json::from_value::<raw::Reply<R>>(value)? {
             raw::Reply::Success(payload) => Ok(payload),
             raw::Reply::Error { message } => Err(ClientError::Server { action, message }),

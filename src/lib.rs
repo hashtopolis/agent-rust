@@ -2,13 +2,16 @@
 #![warn(clippy::self_named_module_files)]
 
 pub mod agent;
-pub mod assets;
 pub mod backend;
+pub mod cli;
 pub mod client;
 pub mod config;
 pub mod cracker;
+pub mod download;
+pub mod identity;
 pub mod model;
 pub mod process;
+pub mod provisioner;
 pub mod sysinfo;
 pub mod transport;
 pub mod update;
