@@ -102,9 +102,14 @@ pub enum AnyCracker {
     Generic(GenericCracker),
 }
 
-pub fn build_cracker(kind: CrackerKind, cracker_id: u64, binary_path: PathBuf) -> AnyCracker {
+pub fn build_cracker(
+    kind: CrackerKind,
+    cracker_id: u64,
+    binary_path: PathBuf,
+    paths: crate::config::Paths,
+) -> AnyCracker {
     match kind {
-        CrackerKind::Hashcat => HashcatCracker::new(cracker_id, binary_path).into(),
-        CrackerKind::Generic => GenericCracker::new(cracker_id, binary_path).into(),
+        CrackerKind::Hashcat => HashcatCracker::new(cracker_id, binary_path, paths).into(),
+        CrackerKind::Generic => GenericCracker::new(cracker_id, binary_path, paths).into(),
     }
 }

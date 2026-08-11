@@ -10,13 +10,16 @@ pub struct GenericCracker {
     cracker_id: u64,
     #[allow(dead_code)]
     binary_path: PathBuf,
+    #[allow(dead_code)]
+    paths: crate::config::Paths,
 }
 
 impl GenericCracker {
-    pub fn new(cracker_id: u64, binary_path: PathBuf) -> Self {
+    pub fn new(cracker_id: u64, binary_path: PathBuf, paths: crate::config::Paths) -> Self {
         Self {
             cracker_id,
             binary_path,
+            paths,
         }
     }
 }

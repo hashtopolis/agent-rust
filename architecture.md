@@ -49,14 +49,20 @@ src/
     tests/         # unit tests for wire (de)serialization and conversion
 
   backend/
-    mod.rs
+    mod.rs           # backend module list
+    args.rs          # fluent argv builder
     hashcat/
-      mod.rs
-      status.rs    # hashcat status parser
-      commands.rs  # keyspace, etc.
+      mod.rs         # HashcatCracker, build_command, Cracker impl, invocation type
+      chunk.rs       # one chunk run: spawn, multiplex stdout/stderr/outfile, report back
+      keyspace.rs    # --keyspace measurement
+      benchmark.rs   # speed and runtime benchmarks
+      healthcheck.rs # health-check run over a known hashlist
+      paths.rs       # filesystem layout: binary cwd, hashlist/outfile/zap paths
+      argv.rs        # attack string -> argv tokens, parameter splitting
+      status.rs      # hashcat status parser + ANSI stripping
     generic/
-      mod.rs
-      status.rs    # generic status parser
+      mod.rs         # GenericCracker
+      status.rs      # generic status parser
 
 tests/
   agent/           # integration tests for bootstrap, deregister and the loop
@@ -74,7 +80,14 @@ tests/
 - **provisioner.rs** — the `Provisioner` trait plus its on-disk implementation. Everything the `Client` does not cover: crackers, preprocessors, task files, hashlists and founds fetched and placed where the backend expects them. A trait so the loop can run against a fake. The associated `Cracker` type lets that fake hand the loop a fake cracker.
 - **download.rs** — the `Downloader` trait and its reqwest implementation: a url streamed to a path. Separate from `transport.rs` because the JSON API is one POST endpoint while assets are GETs against arbitrary urls with no useful request timeout.
 - **identity.rs** — what this build calls itself: agent type, version, and the `clientSignature` sent on login.
-- **backend/** — one submodule per supported binary. Each owns its own status parser and binary-specific helpers (keyspace calc, command building).
+- **backend/** — one submodule per supported binary, plus **backend/args.rs**: the fluent `Args` builder both backends use to assemble an argv (accepts borrowed or owned tokens, allocates once on `build`).
+  - **hashcat/mod.rs** — `HashcatCracker`, `build_command` (assembles the chunk argv and the paths it reads back from), and the `Cracker` impl that routes each operation to its module.
+  - **hashcat/chunk.rs** — a single chunk run: spawn hashcat as a process group, multiplex stdout, stderr and the tailed outfile onto one channel, and report progress and cracks until the process exits or the server orders a stop.
+  - **hashcat/keyspace.rs**, **benchmark.rs**, **healthcheck.rs** — the one-shot operations (keyspace measure; speed and runtime benchmarks; health check), each capturing the process output and parsing a result.
+  - **hashcat/paths.rs** — the input-side filesystem layout: where the binary runs and where hashlists, outfiles and zap dirs live.
+  - **hashcat/argv.rs** — the input-side token building: the server's attack string and extra parameters turned into argv tokens, with file references resolved to absolute paths.
+  - **hashcat/status.rs** — the output side: parsing hashcat's machine-readable status lines into `HashcatStatus`, plus `strip_ansi` for cleaning its coloured output.
+  - **generic/** — the generic backend behind the same `Cracker` trait
 - **model/** — core domain types shared across modules (`TaskAssignment`, `Chunk`, response types, etc.) plus the wire layer they are decoded from:
   - **model/raw.rs** — serde-serializable wire DTOs for every server request/response and action: exactly what goes over the wire, before any interpretation.
   - **model/convert.rs** — translation between `raw` and the domain types
