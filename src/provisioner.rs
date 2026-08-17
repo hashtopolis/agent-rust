@@ -97,10 +97,34 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
     async fn deletion_check(&self, client: &Client<T>) -> Result<(), ProvisionError> {
         let status = client.get_file_status().await?;
 
-        tracing::info!(
-            files = ?status.filenames,
-            "server file status received; local pruning not yet implemented"
-        );
+        for filename in &status.filenames {
+            // Anything beyond a bare name could resolve outside the files
+            // directory, so we refuse to act on it.
+            if !is_plain_filename(filename) {
+                tracing::warn!(file = %filename, "ignoring deletion request with a path in the file name");
+                continue;
+            }
+
+            let path = self.paths.files.join(filename);
+
+            if !path_exists(&path).await {
+                continue;
+            }
+
+            tracing::info!(file = %filename, "deleting file as requested by server");
+
+            // A wordlist archive leaves an extracted `.txt` behind, so the
+            // sibling goes with the archive.
+            if is_7z(&path) {
+                let extracted = path.with_extension("txt");
+
+                if path_exists(&extracted).await {
+                    remove_file(&extracted).await;
+                }
+            }
+
+            remove_file(&path).await;
+        }
 
         Ok(())
     }
@@ -311,6 +335,21 @@ async fn path_exists(path: &Path) -> bool {
     tokio::fs::try_exists(path).await.unwrap_or(false)
 }
 
+/// A failed delete is logged rather than aborting the sweep: the next check
+/// will retry, and one stuck file should not block the rest.
+async fn remove_file(path: &Path) {
+    if let Err(error) = tokio::fs::remove_file(path).await {
+        tracing::warn!(path = %path.display(), %error, "failed to delete file");
+    }
+}
+
+/// A bare file name with no separator or parent reference. This is what keeps a
+/// server-supplied name from resolving outside the files directory. Both
+/// separators are rejected regardless of platform, matching the reference agent.
+fn is_plain_filename(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['/', '\\']) && name != "." && name != ".."
+}
+
 fn is_7z(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("7z"))
@@ -327,4 +366,25 @@ fn io_at(path: &Path) -> impl FnOnce(io::Error) -> ProvisionError {
     let path = path.to_path_buf();
 
     move |source| ProvisionError::Io { path, source }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_plain_filename;
+
+    #[test]
+    fn plain_names_are_accepted() {
+        assert!(is_plain_filename("wordlist.7z"));
+        assert!(is_plain_filename("rockyou.txt"));
+    }
+
+    #[test]
+    fn names_that_could_escape_the_files_directory_are_rejected() {
+        assert!(!is_plain_filename(""));
+        assert!(!is_plain_filename("../secret"));
+        assert!(!is_plain_filename("sub/dir.txt"));
+        assert!(!is_plain_filename("sub\\dir.txt"));
+        assert!(!is_plain_filename("/etc/passwd"));
+        assert!(!is_plain_filename(".."));
+    }
 }
