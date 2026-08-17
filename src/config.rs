@@ -84,7 +84,7 @@ impl Default for Paths {
             crackers: PathBuf::from("crackers"),
             hashlists: PathBuf::from("hashlists"),
             preprocessors: PathBuf::from("preprocessors"),
-            zaps: PathBuf::from("."),
+            zaps: PathBuf::from("zaps"),
         }
     }
 }
