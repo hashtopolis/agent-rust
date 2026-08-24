@@ -4,7 +4,9 @@ use htp_agent::client::Client;
 use htp_agent::cracker::{
     ChunkOutcome, Cracker, CrackerError, HealthCheckOutcome, ProgressCommand, ProgressSink,
 };
-use htp_agent::model::{Chunk, Preprocessor, ProgressReport, TaskAssignment};
+use std::path::PathBuf;
+
+use htp_agent::model::{Chunk, Preprocessor, ProgressReport, ResolvedPreprocessor, TaskAssignment};
 use htp_agent::provisioner::{ProvisionError, Provisioner};
 use htp_agent::transport::Transport;
 
@@ -25,14 +27,18 @@ impl Default for FakeCracker {
 }
 
 impl Cracker for FakeCracker {
-    async fn measure_keyspace(&self, _task: &TaskAssignment) -> Result<u64, CrackerError> {
-        Ok(self.keyspace)
+    async fn measure_keyspace(
+        &self,
+        _task: &TaskAssignment,
+        _preprocessor: Option<&ResolvedPreprocessor>,
+    ) -> Result<Option<u64>, CrackerError> {
+        Ok(Some(self.keyspace))
     }
 
     async fn run_benchmark(
         &self,
         _task: &TaskAssignment,
-        _measured_keyspace: Option<u64>,
+        _preprocessor: Option<&ResolvedPreprocessor>,
     ) -> Result<Option<String>, CrackerError> {
         Ok(self.benchmark.clone())
     }
@@ -41,6 +47,7 @@ impl Cracker for FakeCracker {
         &self,
         _task: &TaskAssignment,
         _chunk: Chunk,
+        _preprocessor: Option<&ResolvedPreprocessor>,
         sink: &S,
     ) -> Result<ChunkOutcome, CrackerError> {
         let command = sink.send_progress(ProgressReport::default()).await;
@@ -156,9 +163,17 @@ impl<T: Transport> Provisioner<T> for FakeProvisioner {
     async fn ensure_preprocessor(
         &self,
         _client: &Client<T>,
-        _preprocessor: &Preprocessor,
-    ) -> Result<(), ProvisionError> {
-        self.enter(Stage::Preprocessor)
+        preprocessor: &Preprocessor,
+    ) -> Result<ResolvedPreprocessor, ProvisionError> {
+        self.enter(Stage::Preprocessor)?;
+
+        Ok(ResolvedPreprocessor {
+            command: preprocessor.command.clone(),
+            binary_path: PathBuf::from("pp"),
+            keyspace_command: None,
+            skip_command: None,
+            limit_command: None,
+        })
     }
 
     async fn ensure_files(

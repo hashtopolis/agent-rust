@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -37,6 +37,142 @@ pub fn spawn_grouped(program: &Path, args: &[impl AsRef<str>], cwd: &Path) -> io
     command.process_group(0);
 
     command.spawn()
+}
+
+/// A program and its argument list, borrowed together so a pipeline stage is one
+/// value. Grouping them keeps the two stages of [`spawn_pipeline`] from being
+/// transposed at the call site.
+pub struct ProcessSpec<'a, A: AsRef<str>> {
+    pub program: &'a Path,
+    pub args: &'a [A],
+}
+
+/// The two children of a `producer | consumer` pipeline. The caller reads the
+/// consumer's stdout/stderr and must tear down both process groups.
+pub struct Pipeline {
+    pub producer: Child,
+    pub consumer: Child,
+}
+
+/// Spawn `producer | consumer`, both as their own process groups in `cwd`, with
+/// the producer's stdout feeding the consumer's stdin.
+///
+/// With `window` set to `(skip, length)` the stream is filtered in-process: the
+/// first `skip` lines are dropped and the next `length` forwarded, emulating
+/// `| head -n (skip+length) | tail -n length` for preprocessors that lack native
+/// skip/limit flags. Without a window the producer's stdout is handed directly to
+/// the consumer as a kernel pipe, with no per-line overhead.
+pub fn spawn_pipeline<P, C>(
+    producer: ProcessSpec<'_, P>,
+    consumer: ProcessSpec<'_, C>,
+    cwd: &Path,
+    window: Option<(u64, u64)>,
+) -> io::Result<Pipeline>
+where
+    P: AsRef<str>,
+    C: AsRef<str>,
+{
+    let mut producer = spawn_grouped(producer.program, producer.args, cwd)?;
+
+    let producer_stdout = producer
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("producer stdout not captured"))?;
+
+    let mut consumer_command = Command::new(consumer.program);
+    consumer_command
+        .args(consumer.args.iter().map(|arg| arg.as_ref()))
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    #[cfg(unix)]
+    consumer_command.process_group(0);
+
+    match window {
+        None => {
+            consumer_command.stdin(child_stdout_to_stdio(producer_stdout)?);
+            let consumer = consumer_command.spawn()?;
+
+            Ok(Pipeline { producer, consumer })
+        }
+        Some((skip, length)) => {
+            consumer_command.stdin(Stdio::piped());
+            let mut consumer = consumer_command.spawn()?;
+
+            let stdin = consumer
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("consumer stdin not captured"))?;
+
+            spawn_line_window(producer_stdout, stdin, skip, length);
+
+            Ok(Pipeline { producer, consumer })
+        }
+    }
+}
+
+/// Hand a producer's stdout to a consumer's stdin as a direct kernel pipe, by
+/// taking ownership of the underlying fd/handle. This is what keeps the
+/// no-window path free of a userspace copy.
+fn child_stdout_to_stdio(stdout: tokio::process::ChildStdout) -> io::Result<Stdio> {
+    #[cfg(unix)]
+    {
+        Ok(Stdio::from(stdout.into_owned_fd()?))
+    }
+
+    #[cfg(windows)]
+    {
+        Ok(Stdio::from(stdout.into_owned_handle()?))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = stdout;
+        Err(io::Error::other(
+            "pipelining is unsupported on this platform",
+        ))
+    }
+}
+
+/// Read lines from `source`, drop the first `skip`, forward the next `length` to
+/// `sink`, then drop `sink` so the consumer sees EOF. Best-effort: a write error
+/// (consumer gone) just ends the task.
+fn spawn_line_window(
+    source: impl AsyncRead + Unpin + Send + 'static,
+    mut sink: tokio::process::ChildStdin,
+    skip: u64,
+    length: u64,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(source).lines();
+        let mut seen: u64 = 0;
+        let mut forwarded: u64 = 0;
+
+        while forwarded < length {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    seen += 1;
+
+                    if seen <= skip {
+                        continue;
+                    }
+
+                    if sink.write_all(line.as_bytes()).await.is_err()
+                        || sink.write_all(b"\n").await.is_err()
+                    {
+                        return;
+                    }
+
+                    forwarded += 1;
+                }
+                _ => break,
+            }
+        }
+
+        let _ = sink.shutdown().await;
+    })
 }
 
 /// Run a process to completion and return its captured output. For the one-shot
@@ -126,6 +262,23 @@ where
     })
 }
 
+/// Read `reader` line by line and log each non-empty line at `warn`. Used for a
+/// pipeline producer's stderr, which is diagnostic rather than something the
+/// server acts on.
+pub fn spawn_stderr_logger(reader: impl AsyncRead + Unpin + Send + 'static) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = line.trim();
+
+            if !line.is_empty() {
+                tracing::warn!(%line, "preprocessor stderr");
+            }
+        }
+    })
+}
+
 const TAIL_POLL: Duration = Duration::from_millis(50);
 
 /// Tail `path`, forwarding each newly appended line as a mapped event. The file
@@ -206,5 +359,79 @@ async fn open_when_created(path: &Path, finish: &watch::Receiver<bool>) -> Optio
                 tokio::time::sleep(TAIL_POLL).await;
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// `seq 1 100 | cat` with a `(skip=3, length=4)` window should surface lines
+    /// 4..=7 on the consumer's stdout, matching `head -n 7 | tail -n 4`.
+    #[tokio::test]
+    async fn line_window_drops_skip_and_forwards_length() {
+        let mut pipeline = spawn_pipeline(
+            ProcessSpec {
+                program: Path::new("seq"),
+                args: &["1", "100"],
+            },
+            ProcessSpec {
+                program: Path::new("cat"),
+                args: &[] as &[&str],
+            },
+            Path::new("."),
+            Some((3, 4)),
+        )
+        .unwrap();
+
+        let mut output = String::new();
+        pipeline
+            .consumer
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut output)
+            .await
+            .unwrap();
+
+        let _ = pipeline.consumer.wait().await;
+        let _ = pipeline.producer.wait().await;
+
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines, ["4", "5", "6", "7"]);
+    }
+
+    /// Without a window the whole producer stream reaches the consumer.
+    #[tokio::test]
+    async fn no_window_passes_the_full_stream() {
+        let mut pipeline = spawn_pipeline(
+            ProcessSpec {
+                program: Path::new("seq"),
+                args: &["1", "5"],
+            },
+            ProcessSpec {
+                program: Path::new("cat"),
+                args: &[] as &[&str],
+            },
+            Path::new("."),
+            None,
+        )
+        .unwrap();
+
+        let mut output = String::new();
+        pipeline
+            .consumer
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut output)
+            .await
+            .unwrap();
+
+        let _ = pipeline.consumer.wait().await;
+        let _ = pipeline.producer.wait().await;
+
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines, ["1", "2", "3", "4", "5"]);
     }
 }

@@ -6,6 +6,8 @@ mod convert;
 pub(crate) mod raw;
 pub use convert::ProtocolError;
 
+use std::path::PathBuf;
+
 #[cfg(test)]
 mod tests;
 
@@ -105,6 +107,19 @@ pub struct BrainConfig {
 pub struct Preprocessor {
     pub id: u64,
     pub command: String,
+}
+
+/// A preprocessor placed on disk and ready to run: the getTask command joined
+/// with what `downloadBinary` reported (the executable and its skip/limit/
+/// keyspace flags). Produced by provisioning and handed to the backend, which
+/// never sees the client that fetched it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPreprocessor {
+    pub command: String,
+    pub binary_path: PathBuf,
+    pub keyspace_command: Option<String>,
+    pub skip_command: Option<String>,
+    pub limit_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

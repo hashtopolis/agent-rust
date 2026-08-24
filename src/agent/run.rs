@@ -10,7 +10,7 @@ use tokio::time::sleep;
 
 use crate::client::ClientError;
 use crate::cracker::Cracker;
-use crate::model::{GetChunkResponse, GetTaskResponse, TaskAssignment};
+use crate::model::{GetChunkResponse, GetTaskResponse, ResolvedPreprocessor, TaskAssignment};
 use crate::provisioner::Provisioner;
 use crate::transport::Transport;
 
@@ -31,7 +31,6 @@ pub enum Step {
 pub struct LoopState {
     current_task: Option<TaskAssignment>,
     prepared_task_id: Option<u64>,
-    measured_keyspace: Option<u64>,
     last_deletion_check: Option<Instant>,
 }
 
@@ -40,7 +39,6 @@ impl LoopState {
         Self {
             current_task: None,
             prepared_task_id: None,
-            measured_keyspace: None,
             last_deletion_check: None,
         }
     }
@@ -51,7 +49,6 @@ impl LoopState {
 
     fn reset_task(&mut self) {
         self.current_task = None;
-        self.measured_keyspace = None;
     }
 
     fn invalidate_setup(&mut self) {
@@ -141,17 +138,24 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             }
         };
 
-        if let Some(preprocessor) = &task.preprocessor
-            && let Err(error) = self
-                .provisioner
-                .ensure_preprocessor(&self.client, preprocessor)
-                .await
-        {
-            tracing::warn!(%error, "preprocessor not ready");
-            state.reset_task();
+        let preprocessor = match &task.preprocessor {
+            Some(preprocessor) => {
+                match self
+                    .provisioner
+                    .ensure_preprocessor(&self.client, preprocessor)
+                    .await
+                {
+                    Ok(resolved) => Some(resolved),
+                    Err(error) => {
+                        tracing::warn!(%error, "preprocessor not ready");
+                        state.reset_task();
 
-            return Ok(Step::Sleep(RETRY_DELAY));
-        }
+                        return Ok(Step::Sleep(RETRY_DELAY));
+                    }
+                }
+            }
+            None => None,
+        };
 
         if let Err(error) = self
             .provisioner
@@ -218,7 +222,10 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                 Ok(Step::Sleep(RETRY_DELAY))
             }
             GetChunkResponse::KeyspaceRequired => {
-                if let Err(error) = self.measure_and_send_keyspace(state, &task, &cracker).await {
+                if let Err(error) = self
+                    .measure_and_send_keyspace(&task, &cracker, preprocessor.as_ref())
+                    .await
+                {
                     if matches!(error, AgentError::TokenRejected) {
                         return Err(error);
                     }
@@ -228,7 +235,8 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                 Ok(Step::Continue)
             }
             GetChunkResponse::BenchmarkRequired => {
-                self.run_and_send_benchmark(state, &task, &cracker).await
+                self.run_and_send_benchmark(state, &task, &cracker, preprocessor.as_ref())
+                    .await
             }
             GetChunkResponse::Chunk(chunk) => {
                 if chunk.length == 0 {
@@ -251,7 +259,10 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                     "running chunk"
                 );
 
-                match cracker.run_chunk(&task, chunk, &sink).await {
+                match cracker
+                    .run_chunk(&task, chunk, preprocessor.as_ref(), &sink)
+                    .await
+                {
                     Ok(outcome) => {
                         tracing::info!(
                             chunk_id = chunk.id,
@@ -316,11 +327,11 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
 
     async fn measure_and_send_keyspace(
         &self,
-        state: &mut LoopState,
         task: &TaskAssignment,
         cracker: &impl Cracker,
+        preprocessor: Option<&ResolvedPreprocessor>,
     ) -> Result<(), AgentError> {
-        let keyspace = match cracker.measure_keyspace(task).await {
+        let keyspace = match cracker.measure_keyspace(task, preprocessor).await {
             Ok(keyspace) => keyspace,
             Err(error) => {
                 self.report_task_error(task.task_id, "Keyspace measure failed!")
@@ -329,14 +340,13 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                 return Err(error.into());
             }
         };
-        state.measured_keyspace = Some(keyspace);
 
         self.client
             .send_keyspace(task.task_id, keyspace)
             .await
             .map_err(AgentError::client)?;
 
-        tracing::info!(keyspace, "keyspace accepted");
+        tracing::info!(?keyspace, "keyspace accepted");
 
         Ok(())
     }
@@ -346,10 +356,11 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
         state: &mut LoopState,
         task: &TaskAssignment,
         cracker: &impl Cracker,
+        preprocessor: Option<&ResolvedPreprocessor>,
     ) -> Result<Step, AgentError> {
         tracing::info!("benchmark task");
 
-        match cracker.run_benchmark(task, state.measured_keyspace).await {
+        match cracker.run_benchmark(task, preprocessor).await {
             Ok(Some(result)) => {
                 match self
                     .client
