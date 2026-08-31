@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use crate::config::Paths;
 use crate::cracker::{ChunkOutcome, Cracker, CrackerError, HealthCheckOutcome, ProgressSink};
-use crate::model::{Chunk, ResolvedPreprocessor, TaskAssignment};
+use crate::model::{Chunk, CrackerId, ResolvedPreprocessor, TaskAssignment};
 
 use crate::backend::args::Args;
 use argv::path_arg;
@@ -23,13 +23,13 @@ use argv::path_arg;
 pub(super) const OUTFILE_FORMAT: &str = "1,2,3,4";
 
 pub struct HashcatCracker {
-    cracker_id: u64,
+    cracker_id: CrackerId,
     binary_path: PathBuf,
     paths: Paths,
 }
 
 impl HashcatCracker {
-    pub fn new(cracker_id: u64, binary_path: PathBuf, paths: Paths) -> Self {
+    pub fn new(cracker_id: CrackerId, binary_path: PathBuf, paths: Paths) -> Self {
         Self {
             cracker_id,
             binary_path,

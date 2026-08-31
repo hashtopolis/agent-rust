@@ -13,16 +13,16 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::model::Chunk;
+use crate::model::{Chunk, CrackerId};
 
 use super::status::HashcatStatus;
 
 /// One verdict per cracker, shared across its chunks and tasks.
-static CALIBRATIONS: LazyLock<Mutex<HashMap<u64, ProgressCalibration>>> =
+static CALIBRATIONS: LazyLock<Mutex<HashMap<CrackerId, ProgressCalibration>>> =
     LazyLock::new(Default::default);
 
 /// The shared calibration for one cracker, created on first use.
-pub(super) fn calibration_for(cracker_id: u64) -> ProgressCalibration {
+pub(super) fn calibration_for(cracker_id: CrackerId) -> ProgressCalibration {
     CALIBRATIONS
         .lock()
         .expect("progress calibration mutex poisoned")

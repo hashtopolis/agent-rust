@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::backend::generic::GenericCracker;
 use crate::backend::hashcat::HashcatCracker;
-use crate::model::{Chunk, ProgressReport, ResolvedPreprocessor, TaskAssignment};
+use crate::model::{Chunk, CrackerId, ProgressReport, ResolvedPreprocessor, TaskAssignment};
 
 #[derive(Debug, Error)]
 pub enum CrackerError {
@@ -112,7 +112,7 @@ pub enum AnyCracker {
 
 pub fn build_cracker(
     kind: CrackerKind,
-    cracker_id: u64,
+    cracker_id: CrackerId,
     binary_path: PathBuf,
     paths: crate::config::Paths,
 ) -> AnyCracker {

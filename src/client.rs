@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::model::raw::{self, BinaryType, Request};
 use crate::model::{
-    BenchmarkType, CheckClientVersionResponse, DownloadCrackerResponse,
+    BenchmarkType, CheckClientVersionResponse, CrackerId, DownloadCrackerResponse,
     DownloadPreprocessorResponse, DownloadUtilityResponse, GetChunkResponse, GetFileResponse,
     GetFileStatusResponse, GetFoundResponse, GetHashlistResponse, GetHealthCheckResponse,
     GetTaskResponse, LoginResponse, Os, ProgressReport, ProtocolError, RegisterResponse,
@@ -160,7 +160,7 @@ impl<T: Transport> Client<T> {
 
     pub async fn download_cracker(
         &self,
-        binary_version_id: u64,
+        binary_version_id: CrackerId,
     ) -> Result<DownloadCrackerResponse, ClientError> {
         let raw: raw::DownloadBinaryResponse = self
             .call(
