@@ -9,6 +9,9 @@ on:
 jobs:
   bundle:
     name: build rust-agent.zip
+    permissions:
+      # Required so action-gh-release can create/update the release.
+      contents: write
     # macOS host: builds the apple target natively (zig's linker duplicates the
     # IOKit framework, which macOS dyld rejects) and cross-builds the linux-musl
     # and windows-gnu targets via cargo-zigbuild.
