@@ -35,6 +35,11 @@ pub struct Cli {
     #[arg(long)]
     pub disable_update: bool,
 
+    /// Local hashcat binary or install directory. Used only on macOS, as a
+    /// fallback when the cracker archive contains no `hashcat.osx`.
+    #[arg(long, env = "HTP_HASHCAT_PATH")]
+    pub hashcat_path: Option<PathBuf>,
+
     #[arg(long)]
     pub files_path: Option<PathBuf>,
     #[arg(long)]
@@ -72,6 +77,7 @@ impl Cli {
             hashlists_path: self.hashlists_path.clone(),
             preprocessors_path: self.preprocessors_path.clone(),
             zaps_path: self.zaps_path.clone(),
+            hashcat_path: self.hashcat_path.clone(),
         }
     }
 }

@@ -202,7 +202,13 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
 
         let chunk = match self.client.get_chunk(task.task_id).await {
             Ok(chunk) => chunk,
-            Err(error) => return self.on_loop_error("getChunk", error),
+            Err(error) => {
+                // A getChunk failure can mean the server no longer considers us
+                // assigned to this task. Drop the task so the next tick re-syncs
+                // through getTask.
+                state.reset_task();
+                return self.on_loop_error("getChunk", error);
+            }
         };
 
         match chunk {

@@ -127,6 +127,16 @@ impl Behavior {
     }
 }
 
+/// Local cracker overrides. Currently a single fallback used only on macOS,
+/// where the official hashcat archive ships no `hashcat.osx`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CrackerConfig {
+    /// A local hashcat binary or install directory. On macOS, when the cracker
+    /// archive contains no `hashcat.osx`, the agent falls back to this.
+    pub hashcat_path: Option<PathBuf>,
+}
+
 /// User-owned; never written by the agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -135,6 +145,7 @@ pub struct Settings {
     pub agent: AgentInfo,
     pub paths: Paths,
     pub behavior: Behavior,
+    pub cracker: CrackerConfig,
 }
 
 /// Agent-owned; what the agent must remember across restarts.
@@ -160,10 +171,15 @@ pub struct Overrides {
     pub hashlists_path: Option<PathBuf>,
     pub preprocessors_path: Option<PathBuf>,
     pub zaps_path: Option<PathBuf>,
+    pub hashcat_path: Option<PathBuf>,
 }
 
 impl Overrides {
     fn apply(&self, settings: &mut Settings) {
+        if let Some(hashcat_path) = &self.hashcat_path {
+            settings.cracker.hashcat_path = Some(hashcat_path.clone());
+        }
+
         if let Some(url) = &self.url {
             settings.server.url = Some(url.clone());
         }
@@ -442,6 +458,9 @@ mod tests {
                 allow_piping: true,
                 piping_threshold: 80,
                 ..Behavior::default()
+            },
+            cracker: CrackerConfig {
+                hashcat_path: Some(PathBuf::from("/opt/homebrew/bin/hashcat")),
             },
         };
 
