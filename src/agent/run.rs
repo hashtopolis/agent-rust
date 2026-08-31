@@ -157,18 +157,21 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             None => None,
         };
 
-        if let Err(error) = self
-            .provisioner
-            .ensure_files(&self.client, &task.files, task.task_id)
-            .await
-        {
-            tracing::warn!(%error, "required files missing");
-            state.reset_task();
-
-            return Ok(Step::Sleep(RETRY_DELAY));
-        }
-
         if state.prepared_task_id != Some(task.task_id) {
+            // A task's file set is fixed for its lifetime, so files are ensured
+            // once per pickup rather than on every chunk. We do not support
+            // multicast, so this is fine.
+            if let Err(error) = self
+                .provisioner
+                .ensure_files(&self.client, &task.files, task.task_id)
+                .await
+            {
+                tracing::warn!(%error, "required files missing");
+                state.reset_task();
+
+                return Ok(Step::Sleep(RETRY_DELAY));
+            }
+
             if let Err(error) = self
                 .provisioner
                 .ensure_hashlist(&self.client, task.hashlist_id)

@@ -387,8 +387,10 @@ async fn setup_is_prepared_once_and_reused_across_ticks() {
             .count()
     };
 
-    // The hashlist (and the rest of task setup) is provisioned once; the cracker
-    // is re-ensured every tick.
+    // The files and hashlist (and the rest of task setup) are provisioned once;
+    // the cracker is re-ensured every tick. Ensuring files once per task keeps a
+    // completed task from issuing a trailing getFile after its assignment is gone.
+    assert_eq!(count(Stage::Files), 1);
     assert_eq!(count(Stage::Hashlist), 1);
     assert_eq!(count(Stage::Cracker), 2);
 }
