@@ -95,6 +95,12 @@ jq -n \
     '{agent_type: $agent_type, version: $version, built_at: $built_at, binaries: $binaries}' \
     >"$STAGE_DIR/manifest.json"
 
+# Platform-detecting launchers so a user can run the bundle without reaching into
+# a per-target subfolder.
+cp scripts/launcher/run.sh "$STAGE_DIR/run.sh"
+cp scripts/launcher/run.bat "$STAGE_DIR/run.bat"
+chmod +x "$STAGE_DIR/run.sh"
+
 echo ">> writing $ZIP_PATH"
 rm -f "$ZIP_PATH"
 ( cd "$DIST_DIR" && zip -r -q "rust-agent.zip" "rust-agent" )
