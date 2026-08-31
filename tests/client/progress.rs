@@ -11,7 +11,7 @@ async fn send_keyspace_succeeds() {
         json!({"action": "sendKeyspace", "response": "SUCCESS", "keyspace": "OK"}),
     );
 
-    client.send_keyspace(35, 568000).await.unwrap();
+    client.send_keyspace(35, Some(568000)).await.unwrap();
 
     assert_client_sent_body(
         &client,
@@ -20,10 +20,24 @@ async fn send_keyspace_succeeds() {
 }
 
 #[tokio::test]
+async fn send_keyspace_unbounded_is_sent_as_minus_one() {
+    let client = mock_client_returning(
+        json!({"action": "sendKeyspace", "response": "SUCCESS", "keyspace": "OK"}),
+    );
+
+    client.send_keyspace(35, None).await.unwrap();
+
+    assert_client_sent_body(
+        &client,
+        json!({"action": "sendKeyspace", "token": TOKEN, "taskId": 35, "keyspace": -1}),
+    );
+}
+
+#[tokio::test]
 async fn send_keyspace_error() {
     let client = mock_client_returning(error_reply("sendKeyspace"));
 
-    assert_server_error(client.send_keyspace(35, 568000).await, "sendKeyspace");
+    assert_server_error(client.send_keyspace(35, Some(568000)).await, "sendKeyspace");
 }
 
 #[tokio::test]

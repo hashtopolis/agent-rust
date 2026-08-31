@@ -11,7 +11,7 @@ use crate::config::Paths;
 use crate::cracker::{AnyCracker, Cracker, CrackerKind, build_cracker};
 use crate::download::{DownloadError, Downloader};
 use crate::identity::{agent_type, agent_version};
-use crate::model::{CheckClientVersionResponse, Preprocessor};
+use crate::model::{CheckClientVersionResponse, Preprocessor, ResolvedPreprocessor};
 use crate::transport::Transport;
 
 #[derive(Debug, Error)]
@@ -55,7 +55,7 @@ pub trait Provisioner<T: Transport> {
         &self,
         client: &Client<T>,
         preprocessor: &Preprocessor,
-    ) -> Result<(), ProvisionError>;
+    ) -> Result<ResolvedPreprocessor, ProvisionError>;
 
     async fn ensure_files(
         &self,
@@ -175,12 +175,48 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
         ))
     }
 
+    /// Downloads and extracts the preprocessor on first use, then hands back the
+    /// resolved binary path together with the skip/limit/keyspace flags the
+    /// server announced. The command building and pipe execution live in the
+    /// backend, which never sees the client that fetched this.
     async fn ensure_preprocessor(
         &self,
-        _client: &Client<T>,
-        _preprocessor: &Preprocessor,
-    ) -> Result<(), ProvisionError> {
-        todo!("Not yet implemented")
+        client: &Client<T>,
+        preprocessor: &Preprocessor,
+    ) -> Result<ResolvedPreprocessor, ProvisionError> {
+        let info = client.download_preprocessor(preprocessor.id).await?;
+
+        // Absolute so the binary still spawns once the run sets its cwd to the
+        // cracker (pipe) or preprocessor (keyspace) directory.
+        let dir = absolute(self.paths.preprocessors.join(preprocessor.id.to_string()));
+
+        if !dir.is_dir() {
+            let archive = self
+                .paths
+                .preprocessors
+                .join(format!("{}.7z", preprocessor.id));
+            self.downloader.download(&info.url, &archive).await?;
+
+            let extract_dir = dir.clone();
+            let extract_archive = archive.clone();
+            spawn_extract(&archive, move || {
+                archive::extract_flattened(&extract_archive, &extract_dir)
+            })
+            .await?;
+
+            let _ = tokio::fs::remove_file(&archive).await;
+        }
+
+        let binary_path = resolve_binary(&dir, &info.binary).await;
+        make_executable(&binary_path).await?;
+
+        Ok(ResolvedPreprocessor {
+            command: preprocessor.command.clone(),
+            binary_path,
+            keyspace_command: info.keyspace_command,
+            skip_command: info.skip_command,
+            limit_command: info.limit_command,
+        })
     }
 
     /// Fetches every task file that is not already present with the announced
@@ -295,6 +331,35 @@ async fn spawn_extract(
     Ok(())
 }
 
+/// Resolve the preprocessor executable inside its directory. The server sends a
+/// base name (e.g. `pp.bin`); when that file is absent the archive ships a
+/// bitness-suffixed variant instead (`pp64.bin`), so the agent inserts the host
+/// bitness before the extension and falls back to that.
+async fn resolve_binary(dir: &Path, executable: &str) -> PathBuf {
+    let direct = dir.join(executable);
+
+    if path_exists(&direct).await {
+        return direct;
+    }
+
+    dir.join(with_bitness(executable))
+}
+
+/// Insert the host bitness before the file extension: `pp.bin` -> `pp64.bin`,
+/// `pp` -> `pp64`.
+fn with_bitness(name: &str) -> String {
+    let bits = if cfg!(target_pointer_width = "64") {
+        "64"
+    } else {
+        "32"
+    };
+
+    match name.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}{bits}.{ext}"),
+        None => format!("{name}{bits}"),
+    }
+}
+
 /// Mark a freshly extracted cracker binary executable. Extraction does not
 /// always preserve the archived mode bits, so the agent sets them itself.
 async fn make_executable(path: &Path) -> Result<(), ProvisionError> {
@@ -304,12 +369,21 @@ async fn make_executable(path: &Path) -> Result<(), ProvisionError> {
 
         let metadata = tokio::fs::metadata(path).await.map_err(io_at(path))?;
 
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(permissions.mode() | 0o111);
+        let mode = metadata.permissions().mode();
 
-        tokio::fs::set_permissions(path, permissions)
-            .await
-            .map_err(io_at(path))?;
+        // Skip the chmod when the exec bits are already set. This keeps
+        // symlinked binaries working: metadata() and set_permissions()
+        // follow the link, so a link to a binary the agent does not own
+        // (e.g. a Homebrew hashcat) would otherwise fail the
+        // chmod with EPERM even though the target is already executable.
+        if mode & 0o111 != 0o111 {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(mode | 0o111);
+
+            tokio::fs::set_permissions(path, permissions)
+                .await
+                .map_err(io_at(path))?;
+        }
     }
 
     #[cfg(not(unix))]
@@ -370,7 +444,20 @@ fn io_at(path: &Path) -> impl FnOnce(io::Error) -> ProvisionError {
 
 #[cfg(test)]
 mod tests {
-    use super::is_plain_filename;
+    use super::{is_plain_filename, with_bitness};
+
+    #[test]
+    fn bitness_is_inserted_before_the_extension() {
+        let bits = if cfg!(target_pointer_width = "64") {
+            "64"
+        } else {
+            "32"
+        };
+
+        assert_eq!(with_bitness("pp.bin"), format!("pp{bits}.bin"));
+        assert_eq!(with_bitness("pp"), format!("pp{bits}"));
+        assert_eq!(with_bitness("a.b.exe"), format!("a.b{bits}.exe"));
+    }
 
     #[test]
     fn plain_names_are_accepted() {

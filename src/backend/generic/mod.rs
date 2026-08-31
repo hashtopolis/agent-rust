@@ -3,7 +3,7 @@ pub mod status;
 use std::path::PathBuf;
 
 use crate::cracker::{ChunkOutcome, Cracker, CrackerError, HealthCheckOutcome, ProgressSink};
-use crate::model::{Chunk, TaskAssignment};
+use crate::model::{Chunk, ResolvedPreprocessor, TaskAssignment};
 
 pub struct GenericCracker {
     #[allow(dead_code)]
@@ -25,14 +25,18 @@ impl GenericCracker {
 }
 
 impl Cracker for GenericCracker {
-    async fn measure_keyspace(&self, _task: &TaskAssignment) -> Result<u64, CrackerError> {
+    async fn measure_keyspace(
+        &self,
+        _task: &TaskAssignment,
+        _preprocessor: Option<&ResolvedPreprocessor>,
+    ) -> Result<Option<u64>, CrackerError> {
         todo!("generic keyspace measurement")
     }
 
     async fn run_benchmark(
         &self,
         _task: &TaskAssignment,
-        _measured_keyspace: Option<u64>,
+        _preprocessor: Option<&ResolvedPreprocessor>,
     ) -> Result<Option<String>, CrackerError> {
         todo!("generic benchmark")
     }
@@ -41,6 +45,7 @@ impl Cracker for GenericCracker {
         &self,
         _task: &TaskAssignment,
         _chunk: Chunk,
+        _preprocessor: Option<&ResolvedPreprocessor>,
         _sink: &S,
     ) -> Result<ChunkOutcome, CrackerError> {
         todo!("generic chunk run")

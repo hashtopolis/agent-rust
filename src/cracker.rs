@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::backend::generic::GenericCracker;
 use crate::backend::hashcat::HashcatCracker;
-use crate::model::{Chunk, ProgressReport, TaskAssignment};
+use crate::model::{Chunk, ProgressReport, ResolvedPreprocessor, TaskAssignment};
 
 #[derive(Debug, Error)]
 pub enum CrackerError {
@@ -66,19 +66,27 @@ pub struct HealthCheckOutcome {
 
 #[enum_dispatch]
 pub trait Cracker {
-    async fn measure_keyspace(&self, task: &TaskAssignment) -> Result<u64, CrackerError>;
+    /// `Ok(None)` means the keyspace is unbounded or too large to represent: a
+    /// preprocessor with no keyspace command, or a count that overflows the wire
+    /// field. The client encodes that as `-1` for the server.
+    async fn measure_keyspace(
+        &self,
+        task: &TaskAssignment,
+        preprocessor: Option<&ResolvedPreprocessor>,
+    ) -> Result<Option<u64>, CrackerError>;
 
     /// `Ok(None)` means the benchmark produced no usable result.
     async fn run_benchmark(
         &self,
         task: &TaskAssignment,
-        measured_keyspace: Option<u64>,
+        preprocessor: Option<&ResolvedPreprocessor>,
     ) -> Result<Option<String>, CrackerError>;
 
     async fn run_chunk<S: ProgressSink>(
         &self,
         task: &TaskAssignment,
         chunk: Chunk,
+        preprocessor: Option<&ResolvedPreprocessor>,
         sink: &S,
     ) -> Result<ChunkOutcome, CrackerError>;
 

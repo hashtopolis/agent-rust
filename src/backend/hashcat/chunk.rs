@@ -6,7 +6,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::cracker::{ChunkOutcome, CrackerError, ProgressCommand, ProgressSink};
 use crate::model::{Chunk, ProgressReport};
-use crate::process;
+use crate::process::{self, ProcessSpec};
 
 use super::HashcatInvocation;
 use super::status::{self, HashcatStatus};
@@ -26,20 +26,29 @@ pub(super) async fn run<S: ProgressSink>(
     prepare_outfile(&invocation.outfile).await?;
     prepare_zaps_dir(&invocation.zaps_dir).await?;
 
-    let mut child = process::spawn_grouped(&invocation.program, &invocation.args, &invocation.cwd)
-        .map_err(|error| CrackerError::Process(error.to_string()))?;
+    let (mut hashcat, mut preprocessor) =
+        spawn_processes(&invocation).map_err(|error| CrackerError::Process(error.to_string()))?;
 
-    let pid = child.id();
+    // Both hashcat and the preprocessor lead their own groups; a stop must take
+    // down both.
+    let hashcat_pid = hashcat.id();
+    let preprocessor_pid = preprocessor.as_ref().and_then(|child| child.id());
 
-    let stdout = child
+    let stdout = hashcat
         .stdout
         .take()
         .ok_or_else(|| CrackerError::Process("hashcat stdout not captured".into()))?;
 
-    let stderr = child
+    let stderr = hashcat
         .stderr
         .take()
         .ok_or_else(|| CrackerError::Process("hashcat stderr not captured".into()))?;
+
+    // The preprocessor's stderr is logged, not reported as a crack-run error;
+    // hashcat's own stderr is what the server acts on.
+    if let Some(preprocessor_stderr) = preprocessor.as_mut().and_then(|child| child.stderr.take()) {
+        process::spawn_stderr_logger(preprocessor_stderr);
+    }
 
     let (tx, mut rx) = mpsc::channel::<Event>(CHANNEL_CAPACITY);
     let (finish_tx, finish_rx) = watch::channel(false);
@@ -57,9 +66,14 @@ pub(super) async fn run<S: ProgressSink>(
     // the channel closes. We need to drop our handle too so we dont stall progress here.
     drop(tx);
 
-    // Wait for the process group to finish in a separate task (not blocking)
+    // Wait for both groups to finish in a separate task (not blocking).
     let waiter = tokio::spawn(async move {
-        let _ = child.wait().await;
+        let _ = hashcat.wait().await;
+
+        if let Some(mut preprocessor) = preprocessor {
+            let _ = preprocessor.wait().await;
+        }
+
         let _ = finish_tx.send(true);
     });
 
@@ -71,7 +85,7 @@ pub(super) async fn run<S: ProgressSink>(
     );
     keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    let mut state = ChunkRun::new(chunk);
+    let mut state = ChunkRun::new(chunk, invocation.preprocessor.is_some());
 
     loop {
         tokio::select! {
@@ -79,7 +93,8 @@ pub(super) async fn run<S: ProgressSink>(
                 let Some(event) = event else { break; };
 
                 if let Flow::Stop = state.handle(event, sink, &invocation).await {
-                    process::kill_group(pid);
+                    process::kill_group(hashcat_pid);
+                    process::kill_group(preprocessor_pid);
                     state.stopped = true;
                     break;
                 }
@@ -98,6 +113,38 @@ pub(super) async fn run<S: ProgressSink>(
     Ok(ChunkOutcome {
         stopped: state.stopped,
     })
+}
+
+/// Spawn the run: a plain hashcat process, or a `preprocessor | hashcat`
+/// pipeline when the invocation carries a preprocessor. Returns hashcat, whose
+/// output the loop reads, plus the preprocessor to reap.
+fn spawn_processes(
+    invocation: &HashcatInvocation,
+) -> std::io::Result<(tokio::process::Child, Option<tokio::process::Child>)> {
+    match &invocation.preprocessor {
+        None => {
+            let child =
+                process::spawn_grouped(&invocation.program, &invocation.args, &invocation.cwd)?;
+
+            Ok((child, None))
+        }
+        Some(preprocessor) => {
+            let pipeline = process::spawn_pipeline(
+                ProcessSpec {
+                    program: &preprocessor.program,
+                    args: &preprocessor.args,
+                },
+                ProcessSpec {
+                    program: &invocation.program,
+                    args: &invocation.args,
+                },
+                &invocation.cwd,
+                preprocessor.window,
+            )?;
+
+            Ok((pipeline.consumer, Some(pipeline.producer)))
+        }
+    }
 }
 
 /// One item multiplexed onto the run's single channel. Status and debug come
@@ -131,6 +178,7 @@ struct Progress {
 /// Mutable state carried across the run loop's iterations.
 struct ChunkRun {
     chunk: Chunk,
+    piped: bool,
     pending: Vec<String>,
     last_progress: Option<Progress>,
     first_status: bool,
@@ -138,9 +186,10 @@ struct ChunkRun {
 }
 
 impl ChunkRun {
-    fn new(chunk: Chunk) -> Self {
+    fn new(chunk: Chunk, piped: bool) -> Self {
         Self {
             chunk,
+            piped,
             pending: Vec::new(),
             last_progress: None,
             first_status: false,
@@ -210,14 +259,29 @@ impl ChunkRun {
         let temps = status.temps();
         let utils = status.utils();
 
+        // When hashcat cannot report a restore point, the chunk's own start offset
+        // stands in, or the server would read it as no progress from the beginning.
+        let keyspace_progress = if self.restore_point_unavailable(status) {
+            self.chunk.skip
+        } else {
+            status.curku()
+        };
+
         Progress {
-            keyspace_progress: status.curku(),
+            keyspace_progress,
             relative_progress,
             speed: status.speed(),
             state: status.state(),
             gpu_temp: (!temps.is_empty()).then(|| temps.to_vec()),
             gpu_util: (!utils.is_empty()).then(|| utils.to_vec()),
         }
+    }
+
+    /// hashcat cannot produce a restore point (`curku`) when it reads candidates
+    /// from a pipe rather than seeking a wordlist, so it reports `0`. A piped run
+    /// reporting `0` is that case, not genuinely zero progress.
+    fn restore_point_unavailable(&self, status: &HashcatStatus) -> bool {
+        self.piped && status.curku() == 0
     }
 
     /// Send the current progress, draining pending cracks in batches of at most
