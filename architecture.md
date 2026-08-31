@@ -17,6 +17,8 @@ Crude, first-pass architecture for the Rust rewrite of the Hashtopolis agent.
 | Logging        | tracing / tracing-subscriber   |
 | CLI            | clap (args + env)              |
 | Serialization  | serde                          |
+| Archives       | sevenz-rust2, zip              |
+| Self-update    | self-replace                   |
 
 ## File structure
 
@@ -30,6 +32,7 @@ src/
     run.rs         # the work loop: Step, LoopState, run/tick, shutdown signal
     progress.rs    # ClientSink: adapts Client into the backends' ProgressSink
 
+  archive.rs       # in-process 7z extraction (sevenz-rust2)
   cli.rs           # clap argument parser -> config Overrides
   client.rs        # typed server API: getFileStatus, getTask, getChunk, ...
   config.rs        # typesafe config
@@ -60,6 +63,8 @@ src/
       paths.rs       # filesystem layout: binary cwd, hashlist/outfile/zap paths
       argv.rs        # attack string -> argv tokens, parameter splitting
       status.rs      # hashcat status parser + ANSI stripping
+      preprocessor.rs # piped run: <preprocessor> | hashcat
+      progress.rs    # scale hashcat PROGRESS to basis points; pin the reporting convention
     generic/
       mod.rs         # GenericCracker
       status.rs      # generic status parser
@@ -79,6 +84,7 @@ tests/
 - **cracker.rs** — defines the `Cracker` trait and a factory that selects the hashcat or generic backend.
 - **provisioner.rs** — the `Provisioner` trait plus its on-disk implementation. Everything the `Client` does not cover: crackers, preprocessors, task files, hashlists and founds fetched and placed where the backend expects them. A trait so the loop can run against a fake. The associated `Cracker` type lets that fake hand the loop a fake cracker.
 - **download.rs** — the `Downloader` trait and its reqwest implementation: a url streamed to a path. Separate from `transport.rs` because the JSON API is one POST endpoint while assets are GETs against arbitrary urls with no useful request timeout.
+- **archive.rs**: in-process 7z extraction via `sevenz-rust2`. `extract_into` drops an archive's contents at the destination root (wordlists); `extract_flattened` collapses a single wrapping folder (crackers, preprocessors).
 - **identity.rs** — what this build calls itself: agent type, version, and the `clientSignature` sent on login.
 - **backend/** — one submodule per supported binary, plus **backend/args.rs**: the fluent `Args` builder both backends use to assemble an argv (accepts borrowed or owned tokens, allocates once on `build`).
   - **hashcat/mod.rs** — `HashcatCracker`, `build_command` (assembles the chunk argv and the paths it reads back from), and the `Cracker` impl that routes each operation to its module.
@@ -96,10 +102,10 @@ tests/
 - **config.rs** — typesafe config, no string-keyed lookups. Two files with distinct owners: `config.json` holds the user's settings and is **only ever read** by the agent (so it is safe to re-read every loop iteration, and hand edits survive); `state.json` is agent-owned and holds the token and uuid, rewritten atomically when either changes. CLI flags live in `Overrides`, applied over the settings on load and re-applied after every reload, and are never persisted back.
 - **sysinfo.rs** — OS and device inventory for registration / status reporting.
 - **process.rs** — spawning child processes, streaming stdio, reporting.
-- **update.rs** — self-update. Lower priority; disabled in Docker. No ephemeral state (only files on disk). Reports platform target so the server delivers the correct binary; SHA check before applying (supply-chain).
+- **update.rs**: self-update. On a `checkClientVersion` "NEW" reply the agent downloads the server's `rust-agent.zip`, reads `manifest.json`, picks the binary whose `triples` include this build's `agent_target()`, swaps the running executable (`self-replace`) and re-execs. Opt-out via `behavior.disable_update`. Integrity rests on the TLS download: the endpoint carries no hash, so there is no signature check yet.
 
 ## Open questions / notes
 
 - **uftpd**: probably stays for multicast download — no in-process replacement found yet. Could be dropped.
-- **7z**: replace with in-process Rust code (existing code by pwrbob).
-- **Self-update packaging**: `rust` agent type → version → zip with binaries for 2-3 target platforms (x64 primary; Linux / Windows / macOS).
+- **7z**: done. `archive.rs` extracts in-process via `sevenz-rust2` (pure Rust).
+- **Self-update packaging**: done. `scripts/bundle.sh` (cargo-zigbuild plus a native macOS build) produces `rust-agent.zip`: one binary per target (linux-musl x86_64 and aarch64, windows-gnu x86_64, macOS aarch64), a `manifest.json`, and `run.sh`/`run.bat` launchers. Served as the `rust` `AgentBinary`.
