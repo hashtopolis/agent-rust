@@ -23,7 +23,6 @@ use argv::path_arg;
 pub(super) const OUTFILE_FORMAT: &str = "1,2,3,4";
 
 pub struct HashcatCracker {
-    #[allow(dead_code)]
     cracker_id: u64,
     binary_path: PathBuf,
     paths: Paths,
@@ -150,7 +149,11 @@ impl Cracker for HashcatCracker {
             None => self.build_command(task, &chunk)?,
         };
 
-        chunk::run(invocation, chunk, sink).await
+        // The PROGRESS convention is a property of this binary, so its detection
+        // is shared across every chunk of the cracker rather than re-run per chunk.
+        let calibration = progress::calibration_for(self.cracker_id);
+
+        chunk::run(invocation, chunk, calibration, sink).await
     }
 
     async fn run_health_check(

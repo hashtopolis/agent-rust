@@ -1,46 +1,114 @@
+//! Scales a chunk's hashcat `PROGRESS` into 0..=10000 basis points for the
+//! server.
+//!
+//! hashcat counts `PROGRESS current` two ways: pre-2026 from the whole keyspace
+//! (skipped candidates included), since 2026 from the chunk's own start. `CURKU`
+//! is always absolute. See hashcat issue #4805.
+//!
+//! We detect which convention from the data and remember it per cracker (see
+//! [`ProgressCalibration`]). Once the new hashcat version is released, we
+//! can replace this with a version check.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+
 use crate::model::Chunk;
 
 use super::status::HashcatStatus;
 
-/// Which `PROGRESS current` convention a binary uses. See hashcat issue #4805.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProgressMode {
-    /// `current` spans `chunk_start..total` (pre-2026 binaries).
-    Absolute,
-    /// `current` spans `0..total` for this chunk (2026+ binaries).
-    Relative,
+/// One verdict per cracker, shared across its chunks and tasks.
+static CALIBRATIONS: LazyLock<Mutex<HashMap<u64, ProgressCalibration>>> =
+    LazyLock::new(Default::default);
+
+/// The shared calibration for one cracker, created on first use.
+pub(super) fn calibration_for(cracker_id: u64) -> ProgressCalibration {
+    CALIBRATIONS
+        .lock()
+        .expect("progress calibration mutex poisoned")
+        .entry(cracker_id)
+        .or_default()
+        .clone()
 }
 
-/// Scales each status to basis points, latching the binary's [`ProgressMode`].
+/// Whether this cracker reports `PROGRESS` relative to `--skip`. Only ever flips
+/// false -> true: once a chunk proves relative, later chunks trust it instead of
+/// re-guessing (a fast chunk can miss the early status that proves it).
+#[derive(Clone, Default)]
+pub(super) struct ProgressCalibration(Arc<AtomicBool>);
+
+impl ProgressCalibration {
+    fn is_relative(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn mark_relative(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Scales each status to basis points against the cracker's calibration.
 pub(super) struct ProgressScaler {
-    mode: Option<ProgressMode>,
+    calibration: ProgressCalibration,
 }
 
 impl ProgressScaler {
-    pub(super) fn new() -> Self {
-        Self { mode: None }
+    pub(super) fn new(calibration: ProgressCalibration) -> Self {
+        Self { calibration }
     }
 
-    /// The chunk's progress in basis points (0..=10000). Piped runs get no
-    /// `--skip`, so the change never reaches them: they stay on `Absolute`.
+    /// The chunk's progress in basis points (0..=10000).
+    ///
+    /// Piped runs get no `--skip`, so their `PROGRESS` is already chunk-relative;
+    /// they never calibrate and take the absolute path (offset zero there).
     pub(super) fn basis_points(
         &mut self,
         status: &HashcatStatus,
         chunk: &Chunk,
         piped: bool,
     ) -> u64 {
-        if !piped && self.mode.is_none() {
-            self.mode = detect_progress_mode(status, chunk);
+        if !piped && !self.calibration.is_relative() && looks_relative(status, chunk) {
+            self.calibration.mark_relative();
         }
 
-        match self.mode {
-            Some(ProgressMode::Relative) => relative_from_relative(status),
-            _ => relative_from_absolute(status, chunk),
-        }
+        let relative = !piped && self.calibration.is_relative();
+
+        let basis_points = if relative {
+            relative_from_relative(status)
+        } else {
+            relative_from_absolute(status, chunk)
+        };
+
+        tracing::debug!(
+            chunk = chunk.id,
+            piped,
+            relative,
+            curku = status.curku(),
+            progress = status.progress(),
+            total = status.progress_total(),
+            basis_points,
+            "chunk progress scaled"
+        );
+
+        basis_points
     }
 }
 
-/// [`ProgressMode::Absolute`]: offset `current` by the chunk's start, then scale.
+/// Proves the relative convention: `PROGRESS` sits below where an absolute run
+/// would even begin, which an absolute run never does. A late first status
+/// (already past the start) just fails to prove it and defers to calibration.
+fn looks_relative(status: &HashcatStatus, chunk: &Chunk) -> bool {
+    if chunk.skip == 0 || chunk.length == 0 {
+        return false;
+    }
+
+    let total = status.progress_total();
+
+    total > 0 && status.progress() < absolute_chunk_start(total, chunk)
+}
+
+/// Absolute convention: `current` runs from the chunk's start up to `total`, so
+/// offset by that start and scale the rest.
 fn relative_from_absolute(status: &HashcatStatus, chunk: &Chunk) -> u64 {
     let total = status.progress_total();
     let chunk_start = absolute_chunk_start(total, chunk);
@@ -53,7 +121,7 @@ fn relative_from_absolute(status: &HashcatStatus, chunk: &Chunk) -> u64 {
     }
 }
 
-/// [`ProgressMode::Relative`]: `current` already spans `0..total`, a straight fraction.
+/// Relative convention: `current` already spans `0..total`, a plain fraction.
 fn relative_from_relative(status: &HashcatStatus) -> u64 {
     let total = status.progress_total();
 
@@ -74,54 +142,19 @@ fn absolute_chunk_start(total: u64, chunk: &Chunk) -> u64 {
         .unwrap_or(0)
 }
 
-/// Detect the [`ProgressMode`] from one status, or `None` if it can't tell yet.
-///
-/// `CURKU` is absolute in every version, so we compare the reported
-/// `current / total` against the fraction each convention predicts from `curku`
-/// and pick the closer one. The keyspace multiplier cancels in each ratio.
-fn detect_progress_mode(status: &HashcatStatus, chunk: &Chunk) -> Option<ProgressMode> {
-    let skip = chunk.skip;
-    let length = chunk.length;
-
-    // Without a skip the conventions coincide.
-    if skip == 0 {
-        return Some(ProgressMode::Absolute);
-    }
-
-    let total = status.progress_total();
-    let curku = status.curku();
-    let span = skip + length;
-
-    // Need a usable restore point inside the chunk and a non-zero total; else defer.
-    if total == 0 || length == 0 || curku < skip || curku > span {
-        return None;
-    }
-
-    let reported = status.progress() as f64 / total as f64;
-    let absolute = curku as f64 / span as f64;
-    let relative = (curku - skip) as f64 / length as f64;
-
-    if (reported - relative).abs() <= (reported - absolute).abs() {
-        Some(ProgressMode::Relative)
-    } else {
-        Some(ProgressMode::Absolute)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // 900 base words from word 100, over a 10x modifier: PROGRESS spans 1000..10000
-    // absolute or 0..9000 relative; CURKU stays the base word 100..1000.
-    const SKIP: u64 = 100;
-    const LENGTH: u64 = 900;
-    const MULT: u64 = 10;
+    // From a real 2026+ run (-m 3200 -a 3): 3000-word chunks over a x20
+    // amplifier, so total = 60000 per chunk.
+    const LENGTH: u64 = 3000;
+    const TOTAL: u64 = 60000;
 
-    fn chunk() -> Chunk {
+    fn chunk(skip: u64) -> Chunk {
         Chunk {
-            id: 1,
-            skip: SKIP,
+            id: skip / LENGTH,
+            skip,
             length: LENGTH,
         }
     }
@@ -132,102 +165,108 @@ mod tests {
         ))
     }
 
-    /// Pre-2026: PROGRESS counts the skipped words.
-    fn absolute_status(curku: u64) -> HashcatStatus {
-        status(curku, curku * MULT, (SKIP + LENGTH) * MULT)
-    }
-
-    /// 2026+: PROGRESS counts from the chunk start.
-    fn relative_status(curku: u64) -> HashcatStatus {
-        status(curku, (curku - SKIP) * MULT, LENGTH * MULT)
+    #[test]
+    fn an_early_status_proves_the_relative_convention() {
+        // chunk 11 in the trace: skip 6000, first status progress 6000 < 36000.
+        assert!(looks_relative(&status(6000, 6000, TOTAL), &chunk(6000)));
     }
 
     #[test]
-    fn detects_the_absolute_convention() {
+    fn an_advanced_status_cannot_prove_it() {
+        // A late first status (progress 54000, above chunk_start) looks the same
+        // as an absolute run, so it proves nothing.
+        assert!(!looks_relative(&status(9000, 54000, TOTAL), &chunk(9000)));
+    }
+
+    #[test]
+    fn the_absolute_convention_never_looks_relative() {
+        // Old convention: total = span x mult = 240000, current starts at
+        // chunk_start (180000) and never dips below it.
+        assert!(!looks_relative(&status(9000, 180000, 240000), &chunk(9000)));
+        assert!(!looks_relative(
+            &status(12000, 240000, 240000),
+            &chunk(9000)
+        ));
+    }
+
+    #[test]
+    fn a_zero_skip_never_calibrates() {
+        assert!(!looks_relative(&status(0, 0, TOTAL), &chunk(0)));
+    }
+
+    #[test]
+    fn a_relative_chunk_calibrates_and_scales() {
+        let calibration = ProgressCalibration::default();
+        let mut scaler = ProgressScaler::new(calibration.clone());
+
+        // Early status proves relative and scales as a straight fraction.
         assert_eq!(
-            detect_progress_mode(&absolute_status(550), &chunk()),
-            Some(ProgressMode::Absolute)
+            scaler.basis_points(&status(6000, 6000, TOTAL), &chunk(6000), false),
+            1000
+        );
+        assert!(calibration.is_relative());
+
+        assert_eq!(
+            scaler.basis_points(&status(9000, 60000, TOTAL), &chunk(6000), false),
+            10000
         );
     }
 
     #[test]
-    fn detects_the_relative_convention() {
+    fn a_fast_chunk_inherits_the_calibration() {
+        let calibration = ProgressCalibration::default();
+
+        // An earlier chunk already proved the relative convention.
+        calibration.mark_relative();
+
+        // This fast chunk's first status is already advanced (54000), so it
+        // can't tell on its own, but it inherits the verdict and scales to the
+        // true 90% instead of 60%.
+        let mut scaler = ProgressScaler::new(calibration);
         assert_eq!(
-            detect_progress_mode(&relative_status(550), &chunk()),
-            Some(ProgressMode::Relative)
+            scaler.basis_points(&status(9000, 54000, TOTAL), &chunk(9000), false),
+            9000
         );
     }
 
     #[test]
-    fn detection_holds_at_the_chunk_start() {
-        // curku == skip is the hardest case; reported current still separates them.
+    fn a_fresh_scaler_defaults_to_absolute() {
+        // Same status with no prior verdict falls back to absolute (60%). This is
+        // the gap a lone fast chunk can't close.
+        let mut scaler = ProgressScaler::new(ProgressCalibration::default());
         assert_eq!(
-            detect_progress_mode(&absolute_status(SKIP), &chunk()),
-            Some(ProgressMode::Absolute)
-        );
-        assert_eq!(
-            detect_progress_mode(&relative_status(SKIP), &chunk()),
-            Some(ProgressMode::Relative)
+            scaler.basis_points(&status(9000, 54000, TOTAL), &chunk(9000), false),
+            6000
         );
     }
 
     #[test]
-    fn a_zero_skip_needs_no_detection() {
-        let chunk = Chunk {
-            id: 1,
-            skip: 0,
-            length: LENGTH,
-        };
+    fn an_absolute_binary_never_calibrates_and_scales() {
+        let calibration = ProgressCalibration::default();
+        let mut scaler = ProgressScaler::new(calibration.clone());
 
         assert_eq!(
-            detect_progress_mode(&status(0, 4500, 9000), &chunk),
-            Some(ProgressMode::Absolute)
-        );
-    }
-
-    #[test]
-    fn detection_defers_without_a_usable_restore_point() {
-        // curku 0 (below skip) can't decide.
-        assert_eq!(detect_progress_mode(&status(0, 0, 9000), &chunk()), None);
-    }
-
-    #[test]
-    fn both_conventions_scale_to_the_same_basis_points() {
-        // Base word 550 is the chunk's halfway point: (550 - 100) / 900.
-        assert_eq!(
-            relative_from_absolute(&absolute_status(550), &chunk()),
-            5000
-        );
-        assert_eq!(relative_from_relative(&relative_status(550)), 5000);
-    }
-
-    #[test]
-    fn a_relative_binary_latches_and_reports_correctly() {
-        let mut scaler = ProgressScaler::new();
-
-        // First status settles the convention, then the halfway status scales.
-        assert_eq!(
-            scaler.basis_points(&relative_status(SKIP), &chunk(), false),
+            scaler.basis_points(&status(9000, 180000, 240000), &chunk(9000), false),
             0
         );
-        assert_eq!(scaler.mode, Some(ProgressMode::Relative));
-
         assert_eq!(
-            scaler.basis_points(&relative_status(550), &chunk(), false),
-            5000
+            scaler.basis_points(&status(12000, 240000, 240000), &chunk(9000), false),
+            10000
         );
+        assert!(!calibration.is_relative());
     }
 
     #[test]
-    fn piped_runs_keep_the_absolute_path_unchanged() {
-        // No --skip reaches hashcat, so no mode is detected and the absolute
-        // path stands (chunk_start = 900 over this 9000-unit stream).
-        let mut scaler = ProgressScaler::new();
+    fn piped_runs_never_calibrate() {
+        let calibration = ProgressCalibration::default();
+        let mut scaler = ProgressScaler::new(calibration.clone());
 
+        // A relative-looking status on a piped run must not calibrate; it stays
+        // on the absolute path (chunk_start 36000 here).
         assert_eq!(
-            scaler.basis_points(&status(0, 4500, 9000), &chunk(), true),
-            4444
+            scaler.basis_points(&status(6000, 6000, TOTAL), &chunk(6000), true),
+            0
         );
-        assert_eq!(scaler.mode, None);
+        assert!(!calibration.is_relative());
     }
 }
