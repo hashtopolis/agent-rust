@@ -5,6 +5,7 @@ mod healthcheck;
 mod keyspace;
 mod paths;
 mod preprocessor;
+mod progress;
 pub mod status;
 
 use std::path::PathBuf;
