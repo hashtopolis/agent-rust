@@ -3,13 +3,12 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use tracing_subscriber::EnvFilter;
 
-use htp_agent::agent::{Agent, deregister};
+use htp_agent::agent::deregister;
 use htp_agent::cli::Cli;
 use htp_agent::client::Client;
 use htp_agent::config::Config;
-use htp_agent::download::HttpDownloader;
-use htp_agent::provisioner::DiskProvisioner;
-use htp_agent::transport::HttpTransport;
+use htp_agent::runtime::HttpRuntimeFactory;
+use htp_agent::supervisor::Supervisor;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -37,11 +36,12 @@ fn init_logging(debug: bool) {
 
 async fn run(cli: Cli) -> Result<()> {
     let config = Config::load(&cli.config, &cli.state, cli.overrides())?;
-
-    let url = config.require_url()?;
-    let transport = HttpTransport::new(url).context("building the HTTP transport")?;
+    let factory = HttpRuntimeFactory;
 
     if cli.de_register {
+        let transport = factory
+            .build_transport(&config)
+            .context("building the HTTP transport")?;
         let Some(token) = config.token() else {
             bail!("nothing to deregister: no token in the state file");
         };
@@ -52,18 +52,8 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    let hashcat_path = config.settings().cracker.hashcat_path.clone();
-
-    if hashcat_path.is_some() && !cfg!(target_os = "macos") {
-        tracing::warn!("hashcat_path is only used on macOS; ignoring it on this platform");
-    }
-
-    let downloader = HttpDownloader::new(reqwest::Client::new(), transport.url());
-    let provisioner =
-        DiskProvisioner::new(config.settings().paths.clone(), hashcat_path, downloader);
-
-    let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
-    agent.run().await?;
+    let mut supervisor = Supervisor::bootstrap(factory, config).await?;
+    supervisor.run().await?;
 
     Ok(())
 }

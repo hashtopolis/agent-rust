@@ -148,6 +148,33 @@ pub struct Settings {
     pub cracker: CrackerConfig,
 }
 
+/// The lifecycle boundary required to activate a settings change. The
+/// supervisor uses this classification to choose between an in-place settings
+/// update and replacement of the complete runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReloadImpact {
+    Live,
+    RebuildTask,
+    Reconnect,
+}
+
+/// A fully parsed settings snapshot which has not been made active yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigCandidate {
+    settings: Settings,
+    impact: ReloadImpact,
+}
+
+impl ConfigCandidate {
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub fn impact(&self) -> ReloadImpact {
+        self.impact
+    }
+}
+
 /// Agent-owned; what the agent must remember across restarts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -222,6 +249,7 @@ pub struct Config {
     overrides: Overrides,
     settings: Settings,
     state: State,
+    persist_state: bool,
 }
 
 impl Config {
@@ -246,15 +274,48 @@ impl Config {
             overrides,
             settings,
             state,
+            persist_state: true,
         })
     }
 
-    /// Leaves the state untouched, so a live session's token cannot change under
-    /// it.
-    pub fn reload_settings(&mut self) -> Result<(), ConfigError> {
+    /// Read and validate a prospective settings generation without changing the
+    /// active one. State is deliberately excluded: tokens and UUIDs remain owned
+    /// by this process rather than being hot-reloaded from disk.
+    pub fn load_candidate(&self) -> Result<Option<ConfigCandidate>, ConfigError> {
         let mut settings = read_settings(&self.settings_path)?;
         self.overrides.apply(&mut settings);
-        self.settings = settings;
+
+        if settings == self.settings {
+            return Ok(None);
+        }
+
+        let impact = reload_impact(&self.settings, &settings);
+
+        Ok(Some(ConfigCandidate { settings, impact }))
+    }
+
+    /// Publish a candidate after the supervisor has prepared and authenticated
+    /// a complete replacement runtime for it.
+    pub fn commit_candidate(&mut self, candidate: ConfigCandidate) {
+        self.settings = candidate.settings;
+    }
+
+    /// Clone this config with a candidate made active. Used to prepare a runtime
+    /// off to the side while the current generation remains untouched.
+    pub fn with_candidate(&self, candidate: &ConfigCandidate) -> Self {
+        let mut config = self.clone();
+        config.settings = candidate.settings.clone();
+        config.persist_state = false;
+        config
+    }
+
+    /// Compatibility helper for callers which do not need transactional
+    /// activation. The supervisor uses [`Config::load_candidate`] and
+    /// [`Config::commit_candidate`] directly.
+    pub fn reload_settings(&mut self) -> Result<(), ConfigError> {
+        if let Some(candidate) = self.load_candidate()? {
+            self.commit_candidate(candidate);
+        }
 
         Ok(())
     }
@@ -277,14 +338,28 @@ impl Config {
 
     pub fn set_token(&mut self, token: impl Into<String>) -> Result<(), ConfigError> {
         self.state.token = Some(token.into());
-        self.save_state()
+        self.save_state_if_enabled()
+    }
+
+    /// Discard an endpoint-specific token while preparing a connection to a
+    /// different server. Candidate state remains in memory until activation.
+    pub(crate) fn clear_token(&mut self) {
+        self.state.token = None;
+    }
+
+    /// Commit state accumulated while preparing a candidate, then make future
+    /// state changes from that generation persistent.
+    pub(crate) fn persist_prepared_state(&mut self) -> Result<(), ConfigError> {
+        self.save_state()?;
+        self.persist_state = true;
+        Ok(())
     }
 
     /// Generates and persists a uuid on first use.
     pub fn uuid_or_create(&mut self) -> Result<&str, ConfigError> {
         if self.state.uuid.is_none() {
             self.state.uuid = Some(Uuid::new_v4().to_string());
-            self.save_state()?;
+            self.save_state_if_enabled()?;
         }
 
         Ok(self
@@ -329,6 +404,14 @@ impl Config {
 
     /// Writes via a temp file and rename so a crash midway cannot leave a
     /// truncated token behind.
+    fn save_state_if_enabled(&self) -> Result<(), ConfigError> {
+        if self.persist_state {
+            self.save_state()?;
+        }
+
+        Ok(())
+    }
+
     fn save_state(&self) -> Result<(), ConfigError> {
         let json =
             serde_json::to_string_pretty(&self.state).map_err(|source| ConfigError::Json {
@@ -346,6 +429,75 @@ impl Config {
             path: self.state_path.clone(),
             source,
         })
+    }
+}
+
+fn reload_impact(current: &Settings, candidate: &Settings) -> ReloadImpact {
+    let Settings {
+        server: current_server,
+        agent: current_agent,
+        paths: current_paths,
+        behavior: current_behavior,
+        cracker: current_cracker,
+    } = current;
+    let Settings {
+        server: candidate_server,
+        agent: candidate_agent,
+        paths: candidate_paths,
+        behavior: candidate_behavior,
+        cracker: candidate_cracker,
+    } = candidate;
+
+    if current_server != candidate_server || current_agent != candidate_agent {
+        return ReloadImpact::Reconnect;
+    }
+
+    if current_paths != candidate_paths || current_cracker != candidate_cracker {
+        return ReloadImpact::RebuildTask;
+    }
+
+    let Behavior {
+        cpu_only: current_cpu_only,
+        disable_update: current_disable_update,
+        allow_piping: current_allow_piping,
+        piping_threshold: current_piping_threshold,
+        outfile_history: current_outfile_history,
+        rsync: current_rsync,
+        rsync_path: current_rsync_path,
+        multicast_device: current_multicast_device,
+        file_deletion_disable: current_file_deletion_disable,
+        file_deletion_interval: current_file_deletion_interval,
+    } = current_behavior;
+    let Behavior {
+        cpu_only: candidate_cpu_only,
+        disable_update: candidate_disable_update,
+        allow_piping: candidate_allow_piping,
+        piping_threshold: candidate_piping_threshold,
+        outfile_history: candidate_outfile_history,
+        rsync: candidate_rsync,
+        rsync_path: candidate_rsync_path,
+        multicast_device: candidate_multicast_device,
+        file_deletion_disable: candidate_file_deletion_disable,
+        file_deletion_interval: candidate_file_deletion_interval,
+    } = candidate_behavior;
+
+    if current_cpu_only != candidate_cpu_only {
+        ReloadImpact::Reconnect
+    } else if current_allow_piping != candidate_allow_piping
+        || current_piping_threshold != candidate_piping_threshold
+        || current_outfile_history != candidate_outfile_history
+        || current_rsync != candidate_rsync
+        || current_rsync_path != candidate_rsync_path
+        || current_multicast_device != candidate_multicast_device
+    {
+        ReloadImpact::RebuildTask
+    } else if current_disable_update != candidate_disable_update
+        || current_file_deletion_disable != candidate_file_deletion_disable
+        || current_file_deletion_interval != candidate_file_deletion_interval
+    {
+        ReloadImpact::Live
+    } else {
+        unreachable!("reload impact requested for identical settings")
     }
 }
 
@@ -562,6 +714,81 @@ mod tests {
     }
 
     #[test]
+    fn candidate_is_transactional_and_classifies_live_changes() {
+        let fixture = Fixture::new();
+        let mut config = fixture.load(Overrides::default()).unwrap();
+
+        fixture.write_settings(r#"{ "behavior": { "disable_update": true } }"#);
+
+        let candidate = config.load_candidate().unwrap().unwrap();
+
+        assert_eq!(candidate.impact(), ReloadImpact::Live);
+        assert!(!config.settings().behavior.disable_update);
+
+        config.commit_candidate(candidate);
+        assert!(config.settings().behavior.disable_update);
+        assert!(config.load_candidate().unwrap().is_none());
+    }
+
+    #[test]
+    fn deletion_schedule_changes_are_explicitly_live() {
+        let fixture = Fixture::new();
+        let config = fixture.load(Overrides::default()).unwrap();
+
+        fixture.write_settings(
+            r#"{
+                "behavior": {
+                    "file_deletion_disable": true,
+                    "file_deletion_interval": 42
+                }
+            }"#,
+        );
+
+        let candidate = config.load_candidate().unwrap().unwrap();
+
+        assert_eq!(candidate.impact(), ReloadImpact::Live);
+    }
+
+    #[test]
+    fn candidate_classifies_task_runtime_changes() {
+        let fixture = Fixture::new();
+        let config = fixture.load(Overrides::default()).unwrap();
+
+        fixture.write_settings(r#"{ "paths": { "files": "/new/files" } }"#);
+
+        let candidate = config.load_candidate().unwrap().unwrap();
+
+        assert_eq!(candidate.impact(), ReloadImpact::RebuildTask);
+        assert_eq!(config.settings().paths.files, PathBuf::from("files"));
+        assert_eq!(
+            candidate.settings().paths.files,
+            PathBuf::from("/new/files")
+        );
+    }
+
+    #[test]
+    fn candidate_classifies_connection_changes() {
+        let fixture = Fixture::new();
+        fixture.write_settings(r#"{ "server": { "url": "https://old.example/api/server.php" } }"#);
+        let config = fixture.load(Overrides::default()).unwrap();
+
+        fixture.write_settings(r#"{ "server": { "url": "https://new.example/api/server.php" } }"#);
+
+        let candidate = config.load_candidate().unwrap().unwrap();
+        let prepared = config.with_candidate(&candidate);
+
+        assert_eq!(candidate.impact(), ReloadImpact::Reconnect);
+        assert_eq!(
+            config.require_url().unwrap(),
+            "https://old.example/api/server.php"
+        );
+        assert_eq!(
+            prepared.require_url().unwrap(),
+            "https://new.example/api/server.php"
+        );
+    }
+
+    #[test]
     fn reload_does_not_touch_the_token() {
         let fixture = Fixture::new();
         let mut config = fixture.load(Overrides::default()).unwrap();
@@ -583,6 +810,30 @@ mod tests {
         assert!(fixture.read_state().contains("GHhgdf(/&"));
         let reloaded = fixture.load(Overrides::default()).unwrap();
         assert_eq!(reloaded.token(), Some("GHhgdf(/&"));
+    }
+
+    #[test]
+    fn prepared_state_is_not_visible_until_committed() {
+        let fixture = Fixture::new();
+        let mut config = fixture.load(Overrides::default()).unwrap();
+        config.set_token("old-token").unwrap();
+        fixture.write_settings(
+            r#"{
+                "server": {
+                    "url": "https://new.example/api/server.php",
+                    "voucher": "voucher"
+                }
+            }"#,
+        );
+
+        let candidate = config.load_candidate().unwrap().unwrap();
+        let mut prepared = config.with_candidate(&candidate);
+        prepared.clear_token();
+        prepared.set_token("new-token").unwrap();
+
+        assert!(fixture.read_state().contains("old-token"));
+        prepared.persist_prepared_state().unwrap();
+        assert!(fixture.read_state().contains("new-token"));
     }
 
     #[test]

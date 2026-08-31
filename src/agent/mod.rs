@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio::time::sleep;
 
 use crate::client::{Client, ClientError};
-use crate::config::{Config, ConfigError, Paths};
+use crate::config::{Config, ConfigError};
 use crate::identity::client_signature;
 use crate::provisioner::Provisioner;
 use crate::sysinfo;
@@ -44,10 +44,25 @@ impl AgentError {
     }
 }
 
-/// Retry a client call, sleeping between transport failures; a rejected token is
-/// fatal and any other server error propagates. `call` manufactures a fresh
-/// future for each attempt.
-async fn with_retry<T, Fut>(mut call: impl FnMut() -> Fut) -> Result<T, AgentError>
+/// Run a client call, optionally retrying transport failures. A rejected token
+/// is always fatal and any other server error propagates. `call` manufactures a
+/// fresh future for each attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootstrapPolicy {
+    RetryTransport,
+    SingleAttempt,
+}
+
+impl BootstrapPolicy {
+    fn retries_transport(self) -> bool {
+        matches!(self, Self::RetryTransport)
+    }
+}
+
+async fn call_with_retry_policy<T, Fut>(
+    policy: BootstrapPolicy,
+    mut call: impl FnMut() -> Fut,
+) -> Result<T, AgentError>
 where
     Fut: Future<Output = Result<T, ClientError>>,
 {
@@ -55,7 +70,7 @@ where
         match call().await {
             Ok(value) => return Ok(value),
             Err(error) if error.is_invalid_token() => return Err(AgentError::TokenRejected),
-            Err(error @ ClientError::Transport { .. }) => {
+            Err(error @ ClientError::Transport { .. }) if policy.retries_transport() => {
                 tracing::warn!(%error, "request failed; retrying");
                 sleep(RETRY_DELAY).await;
             }
@@ -89,15 +104,63 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
         }
     }
 
+    /// The immutable configuration snapshot for this agent generation.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub(crate) fn replace_config(&mut self, config: Config) {
+        self.config = config;
+    }
+
+    /// Swap the provisioner for a rebuilt one while keeping the live client and
+    /// session. Used to activate a `RebuildTask` reload without re-logging in.
+    pub(crate) fn replace_provisioner(&mut self, provisioner: P) {
+        self.provisioner = provisioner;
+    }
+
     pub async fn bootstrap(
+        transport: T,
+        config: Config,
+        provisioner: P,
+    ) -> Result<Self, AgentError> {
+        Self::bootstrap_with_policy(
+            transport,
+            config,
+            provisioner,
+            BootstrapPolicy::RetryTransport,
+        )
+        .await
+    }
+
+    /// Prepare a replacement generation with a single attempt per request. A
+    /// supervisor must be able to retain the active generation when a candidate
+    /// endpoint is unavailable instead of blocking forever in bootstrap retry.
+    pub async fn bootstrap_once(
+        transport: T,
+        config: Config,
+        provisioner: P,
+    ) -> Result<Self, AgentError> {
+        Self::bootstrap_with_policy(
+            transport,
+            config,
+            provisioner,
+            BootstrapPolicy::SingleAttempt,
+        )
+        .await
+    }
+
+    async fn bootstrap_with_policy(
         transport: T,
         mut config: Config,
         provisioner: P,
+        policy: BootstrapPolicy,
     ) -> Result<Self, AgentError> {
-        let token = resolve_token(&transport, &mut config).await?;
+        let token = resolve_token(&transport, &mut config, policy).await?;
         let client = Client::with_token(transport, token);
 
-        let login_result = with_retry(|| client.login(client_signature())).await?;
+        let login_result =
+            call_with_retry_policy(policy, || client.login(client_signature())).await?;
         tracing::info!(
             server_version = %login_result.server_version,
             timeout = login_result.timeout,
@@ -114,9 +177,7 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             settings.behavior.cpu_only,
         );
 
-        with_retry(|| client.update_information(&uuid, &devices)).await?;
-
-        Self::create_file_paths(&settings.paths)?;
+        call_with_retry_policy(policy, || client.update_information(&uuid, &devices)).await?;
 
         let session = Session {
             timeout: login_result.timeout,
@@ -130,32 +191,15 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
     pub async fn deregister(self) -> Result<(), AgentError> {
         deregister(&self.client, &self.config).await
     }
-
-    fn create_file_paths(paths: &Paths) -> Result<(), ConfigError> {
-        // Old python agent did not create zaps path
-        for dir in [
-            &paths.files,
-            &paths.crackers,
-            &paths.hashlists,
-            &paths.preprocessors,
-            &paths.zaps,
-        ] {
-            std::fs::create_dir_all(dir).map_err(|source| ConfigError::CreateDir {
-                path: dir.clone(),
-                source,
-            })?;
-        }
-
-        Ok(())
-    }
 }
 
 async fn resolve_token<T: Transport>(
     transport: &T,
     config: &mut Config,
+    policy: BootstrapPolicy,
 ) -> Result<String, AgentError> {
     let probe = Client::new(transport);
-    with_retry(|| probe.test_connection()).await?;
+    call_with_retry_policy(policy, || probe.test_connection()).await?;
 
     if let Some(token) = config.token() {
         tracing::info!("using stored token");
@@ -172,8 +216,10 @@ async fn resolve_token<T: Transport>(
         .unwrap_or_else(sysinfo::hostname);
     let cpu_only = config.settings().behavior.cpu_only.then_some(true);
 
-    let registered =
-        with_retry(|| probe.register(voucher.as_str(), name.as_str(), cpu_only)).await?;
+    let registered = call_with_retry_policy(policy, || {
+        probe.register(voucher.as_str(), name.as_str(), cpu_only)
+    })
+    .await?;
 
     config.set_token(registered.token.as_str())?;
     tracing::info!("registered successfully");

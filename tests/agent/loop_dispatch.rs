@@ -11,8 +11,8 @@ use crate::support::transport::{
     task_reply_with_brain, task_reply_with_preprocessor,
 };
 
-/// One loop iteration's worth of moving parts. `env` is kept alive because
-/// every tick reloads settings from its files.
+/// One loop iteration's worth of moving parts. `env` owns the files from which
+/// this immutable test generation was constructed.
 struct AgentRig {
     agent: Agent<ScriptedTransport, FakeProvisioner>,
     transport: ScriptedTransport,

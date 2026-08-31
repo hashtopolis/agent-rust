@@ -25,10 +25,24 @@ pub enum TransportError {
     Status(u16),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpTransport {
     client: reqwest::Client,
     url: String,
+    basic_auth: Option<(String, String)>,
+}
+
+impl std::fmt::Debug for HttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpTransport")
+            .field("client", &self.client)
+            .field("url", &self.url)
+            .field(
+                "basic_auth",
+                &self.basic_auth.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl HttpTransport {
@@ -48,7 +62,13 @@ impl HttpTransport {
         Ok(Self {
             client,
             url: url.into(),
+            basic_auth: None,
         })
+    }
+
+    pub fn with_basic_auth(mut self, username: String, password: String) -> Self {
+        self.basic_auth = Some((username, password));
+        self
     }
 
     pub fn url(&self) -> &str {
@@ -58,7 +78,13 @@ impl HttpTransport {
 
 impl Transport for HttpTransport {
     async fn post_json(&self, body: &Value) -> Result<Value, TransportError> {
-        let response = self.client.post(&self.url).json(body).send().await?;
+        let mut request = self.client.post(&self.url).json(body);
+
+        if let Some((username, password)) = &self.basic_auth {
+            request = request.basic_auth(username, Some(password));
+        }
+
+        let response = request.send().await?;
         let status = response.status();
 
         if !status.is_success() {

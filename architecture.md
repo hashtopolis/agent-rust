@@ -41,6 +41,8 @@ src/
   identity.rs      # agent type, version and client signature
   process.rs       # process helpers, stdio stream handling / reporting
   provisioner.rs   # Provisioner trait + DiskProvisioner: assets onto disk
+  runtime.rs       # RuntimeFactory: prepare a complete agent generation
+  supervisor.rs    # safe-point reload and transactional generation handover
   sysinfo.rs       # OS + device inventory
   transport.rs     # low-level HTTP: Transport trait, reqwest impl
   update.rs        # self-update machinery
@@ -76,7 +78,9 @@ tests/
 
 ## Module responsibilities
 
-- **agent/** — orchestrator, split so the startup path and the steady-state loop stay separable:
+- **supervisor.rs** — process-level lifecycle owner. Polls the user settings before each agent tick and activates a candidate by its `ReloadImpact`: `Live` settings are swapped onto the running agent without dropping loop state; `RebuildTask` changes (paths/cracker) rebuild only the provisioner locally and swap it in without re-authenticating, dropping the in-flight task; `Reconnect` changes (server/agent identity) are built as full replacement generations and swapped only after login succeeds. A tick includes a complete chunk, so no running chunk observes a reload. Invalid settings or a failed rebuild/replacement leave the active generation untouched.
+- **runtime.rs** — `RuntimeFactory` and the production `HttpRuntimeFactory`. `build_provisioner` constructs the downloader/provisioner and its directories from a settings snapshot with no network; `prepare` adds the transport plus the network bootstrap for a complete transport/downloader/provisioner/client/session generation. API calls have a bounded timeout; streamed downloads use separate untimed clients, and server credentials are scoped to the server origin. Initial construction retains bootstrap retry behavior; replacement construction makes one attempt so the supervisor can roll back to the active generation.
+- **agent/** — work orchestrator for one immutable configuration generation, split so the startup path and the steady-state loop stay separable:
   - **agent/mod.rs** — `AgentError`, the retry macro, `Session`, the `Agent` struct and its startup path (`bootstrap`, token resolution, registration, directory creation), plus `deregister`.
   - **agent/run.rs** — the run loop, in a second `impl Agent` block. Asks `client` for work, dispatches tasks/chunks to a backend via the `Cracker` trait, reports progress, holds the state machine. `tick` performs one iteration and returns a `Step` (continue / sleep / shutdown) instead of sleeping itself, so `run` owns all timing and the shutdown signal and the loop stays testable.
   - **agent/progress.rs** — `ClientSink`, which adapts the `Client` into the `ProgressSink` the backends report through.
@@ -99,7 +103,7 @@ tests/
   - **model/convert.rs** — translation between `raw` and the domain types
 - **transport.rs** — low-level HTTP: the `Transport` trait (one `post_json` call) and its reqwest implementation.
 - **client.rs** — typed, high-level API over `Transport` (`getFileStatus`, `getTask`, `getChunk`, ...). No raw JSON leaks past this layer. Integration-tested in `tests/client/` against a mock `Transport`. Is allowed to use `model::raw` module 
-- **config.rs** — typesafe config, no string-keyed lookups. Two files with distinct owners: `config.json` holds the user's settings and is **only ever read** by the agent (so it is safe to re-read every loop iteration, and hand edits survive); `state.json` is agent-owned and holds the token and uuid, rewritten atomically when either changes. CLI flags live in `Overrides`, applied over the settings on load and re-applied after every reload, and are never persisted back.
+- **config.rs** — typesafe config, no string-keyed lookups. Two files with distinct owners: `config.json` holds the user's settings and is **only ever read** by the agent; `state.json` is agent-owned and holds the token and uuid, rewritten atomically when either changes. Reload reads a complete candidate, reapplies CLI overrides, classifies its lifecycle impact, and does not publish it until the supervisor activates a prepared runtime. CLI flags are never persisted back.
 - **sysinfo.rs** — OS and device inventory for registration / status reporting.
 - **process.rs** — spawning child processes, streaming stdio, reporting.
 - **update.rs**: self-update. On a `checkClientVersion` "NEW" reply the agent downloads the server's `rust-agent.zip`, reads `manifest.json`, picks the binary whose `triples` include this build's `agent_target()`, swaps the running executable (`self-replace`) and re-execs. Opt-out via `behavior.disable_update`. Integrity rests on the TLS download: the endpoint carries no hash, so there is no signature check yet.

@@ -38,18 +38,49 @@ impl<D: Downloader + ?Sized> Downloader for &D {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpDownloader {
-    client: reqwest::Client,
+    server_client: reqwest::Client,
+    external_client: reqwest::Client,
     base_url: String,
+    basic_auth: Option<(String, String)>,
+}
+
+impl std::fmt::Debug for HttpDownloader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpDownloader")
+            .field("server_client", &self.server_client)
+            .field("external_client", &self.external_client)
+            .field("base_url", &self.base_url)
+            .field(
+                "basic_auth",
+                &self.basic_auth.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl HttpDownloader {
     pub fn new(client: reqwest::Client, base_url: impl Into<String>) -> Self {
+        Self::with_clients(client.clone(), client, base_url)
+    }
+
+    pub fn with_clients(
+        server_client: reqwest::Client,
+        external_client: reqwest::Client,
+        base_url: impl Into<String>,
+    ) -> Self {
         Self {
-            client,
+            server_client,
+            external_client,
             base_url: base_url.into(),
+            basic_auth: None,
         }
+    }
+
+    pub fn with_basic_auth(mut self, username: String, password: String) -> Self {
+        self.basic_auth = Some((username, password));
+        self
     }
 
     /// Cracker and preprocessor downloads carry absolute URLs; hashlist, file and
@@ -64,21 +95,44 @@ impl HttpDownloader {
 
         format!("{root}{url}")
     }
+
+    fn is_server_url(&self, url: &str) -> bool {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return true;
+        }
+
+        let (Ok(base), Ok(candidate)) = (
+            reqwest::Url::parse(&self.base_url),
+            reqwest::Url::parse(url),
+        ) else {
+            return false;
+        };
+
+        base.scheme() == candidate.scheme()
+            && base.host_str() == candidate.host_str()
+            && base.port_or_known_default() == candidate.port_or_known_default()
+    }
 }
 
 impl Downloader for HttpDownloader {
     async fn download(&self, url: &str, dest: &Path) -> Result<(), DownloadError> {
+        let server_url = self.is_server_url(url);
         let url = self.resolve(url);
+        let client = if server_url {
+            &self.server_client
+        } else {
+            &self.external_client
+        };
+        let mut request = client.get(&url);
 
-        let mut response =
-            self.client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|source| DownloadError::Http {
-                    url: url.clone(),
-                    source,
-                })?;
+        if server_url && let Some((username, password)) = &self.basic_auth {
+            request = request.basic_auth(username, Some(password));
+        }
+
+        let mut response = request.send().await.map_err(|source| DownloadError::Http {
+            url: url.clone(),
+            source,
+        })?;
 
         let status = response.status();
 
@@ -157,5 +211,21 @@ mod tests {
             d.resolve("getFile/12/wordlist.txt"),
             "https://server.example/getFile/12/wordlist.txt"
         );
+    }
+
+    #[test]
+    fn relative_and_same_origin_urls_use_the_server_client() {
+        let d = downloader("https://server.example:443/api/server.php");
+
+        assert!(d.is_server_url("getFile/12/wordlist.txt"));
+        assert!(d.is_server_url("https://server.example/getFile/12/wordlist.txt"));
+    }
+
+    #[test]
+    fn external_urls_do_not_receive_server_credentials() {
+        let d = downloader("https://server.example/api/server.php");
+
+        assert!(!d.is_server_url("https://downloads.example/hashcat.7z"));
+        assert!(!d.is_server_url("http://server.example/hashcat.7z"));
     }
 }

@@ -13,6 +13,8 @@ pub mod identity;
 pub mod model;
 pub mod process;
 pub mod provisioner;
+pub mod runtime;
+pub mod supervisor;
 pub mod sysinfo;
 pub mod transport;
 pub mod update;

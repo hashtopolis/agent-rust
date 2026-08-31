@@ -1,12 +1,10 @@
 //! The agent work loop
 //!
 //! [`Agent::tick`] runs one iteration and returns a [`Step`] instead of
-//! sleeping; [`Agent::run`] owns the timing and shutdown, which keeps the loop
-//! testable without mocking time.
+//! sleeping, which lets the supervisor own timing, shutdown, and reloads while
+//! keeping the work loop testable without mocking time.
 
 use std::time::{Duration, Instant};
-
-use tokio::time::sleep;
 
 use crate::client::ClientError;
 use crate::cracker::Cracker;
@@ -63,36 +61,7 @@ impl Default for LoopState {
 }
 
 impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
-    pub async fn run(&mut self) -> Result<(), AgentError> {
-        tracing::debug!("entering agent loop");
-
-        let mut state = LoopState::new();
-        let mut shutdown = Box::pin(shutdown_signal());
-
-        loop {
-            let step = tokio::select! {
-                _ = &mut shutdown => Step::Shutdown,
-                result = self.tick(&mut state) => result?,
-            };
-
-            match step {
-                Step::Continue => {}
-                Step::Sleep(delay) => {
-                    tokio::select! {
-                        _ = &mut shutdown => return Ok(()),
-                        _ = sleep(delay) => {}
-                    }
-                }
-                Step::Shutdown => return Ok(()),
-            }
-        }
-    }
-
     pub async fn tick(&mut self, state: &mut LoopState) -> Result<Step, AgentError> {
-        if let Err(error) = self.config.reload_settings() {
-            tracing::warn!(%error, "failed to reload settings; keeping the previous ones");
-        }
-
         self.maybe_deletion_check(state).await;
 
         if state.current_task.is_none() {
@@ -468,31 +437,4 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
 
         Ok(Step::Sleep(RETRY_DELAY))
     }
-}
-
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = term.recv() => {}
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "cannot listen for SIGTERM; using Ctrl-C only");
-                let _ = tokio::signal::ctrl_c().await;
-            }
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
-
-    tracing::info!("shutdown signal received");
 }
