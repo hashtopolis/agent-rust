@@ -237,13 +237,21 @@ impl<T: Transport> Client<T> {
         Ok(GetChunkResponse::try_from(raw)?)
     }
 
-    pub async fn send_keyspace(&self, task_id: u64, keyspace: u64) -> Result<(), ClientError> {
+    /// `None` means the keyspace is unbounded or too large to represent; the
+    /// server recognises `-1` for that.
+    pub async fn send_keyspace(
+        &self,
+        task_id: u64,
+        keyspace: Option<u64>,
+    ) -> Result<(), ClientError> {
+        const UNBOUNDED_KEYSPACE: i64 = -1;
+
         self.call_ack(
             "sendKeyspace",
             Request::SendKeyspace {
                 token: self.token_owned(),
                 task_id,
-                keyspace,
+                keyspace: keyspace.map_or(UNBOUNDED_KEYSPACE, |value| value as i64),
             },
         )
         .await

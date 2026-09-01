@@ -4,13 +4,14 @@ mod chunk;
 mod healthcheck;
 mod keyspace;
 mod paths;
+mod preprocessor;
 pub mod status;
 
 use std::path::PathBuf;
 
 use crate::config::Paths;
 use crate::cracker::{ChunkOutcome, Cracker, CrackerError, HealthCheckOutcome, ProgressSink};
-use crate::model::{Chunk, TaskAssignment};
+use crate::model::{Chunk, ResolvedPreprocessor, TaskAssignment};
 
 use crate::backend::args::Args;
 use argv::path_arg;
@@ -18,7 +19,7 @@ use argv::path_arg;
 /// Modern hashcat (v6+) crack-record format `hash:plain:hex_plain:crack_pos`.
 /// Deferred: the old `15` format for pre-6.0 binaries, which needs version
 /// detection at construction.
-const OUTFILE_FORMAT: &str = "1,2,3,4";
+pub(super) const OUTFILE_FORMAT: &str = "1,2,3,4";
 
 pub struct HashcatCracker {
     #[allow(dead_code)]
@@ -36,8 +37,8 @@ impl HashcatCracker {
         }
     }
 
-    /// Assemble the argv and paths for a chunk run. Deferred: the pipe and
-    /// preprocessor command variants (this builds the plain attack path only).
+    /// Assemble the argv and paths for a plain (non-preprocessor) chunk run. The
+    /// preprocessor pipe variant lives in [`preprocessor`].
     fn build_command(
         &self,
         task: &TaskAssignment,
@@ -92,40 +93,61 @@ impl HashcatCracker {
             cwd: self.cwd().to_path_buf(),
             outfile,
             zaps_dir,
+            preprocessor: None,
         })
     }
 }
 
 /// Everything a chunk run needs from command assembly: what to spawn, where, and
-/// the two files the run reads back from and writes zaps into.
+/// the two files the run reads back from and writes zaps into. `program`/`args`
+/// describe hashcat itself; `preprocessor`, when set, is a stage whose stdout
+/// feeds hashcat's stdin.
 struct HashcatInvocation {
     program: PathBuf,
     args: Vec<String>,
     cwd: PathBuf,
     outfile: PathBuf,
     zaps_dir: PathBuf,
+    preprocessor: Option<PreprocessorSpec>,
+}
+
+/// The preprocessor half of a piped run. `window` is set only when the
+/// preprocessor lacks native skip/limit flags, in which case the `(skip, length)`
+/// range is applied to its output stream in-process.
+struct PreprocessorSpec {
+    program: PathBuf,
+    args: Vec<String>,
+    window: Option<(u64, u64)>,
 }
 
 impl Cracker for HashcatCracker {
-    async fn measure_keyspace(&self, task: &TaskAssignment) -> Result<u64, CrackerError> {
-        keyspace::measure(self, task).await
+    async fn measure_keyspace(
+        &self,
+        task: &TaskAssignment,
+        preprocessor: Option<&ResolvedPreprocessor>,
+    ) -> Result<Option<u64>, CrackerError> {
+        keyspace::measure(self, task, preprocessor).await
     }
 
     async fn run_benchmark(
         &self,
         task: &TaskAssignment,
-        measured_keyspace: Option<u64>,
+        preprocessor: Option<&ResolvedPreprocessor>,
     ) -> Result<Option<String>, CrackerError> {
-        benchmark::run(self, task, measured_keyspace).await
+        benchmark::run(self, task, preprocessor).await
     }
 
     async fn run_chunk<S: ProgressSink>(
         &self,
         task: &TaskAssignment,
         chunk: Chunk,
+        preprocessor: Option<&ResolvedPreprocessor>,
         sink: &S,
     ) -> Result<ChunkOutcome, CrackerError> {
-        let invocation = self.build_command(task, &chunk)?;
+        let invocation = match preprocessor {
+            Some(pp) => self.build_preprocessor_command(task, &chunk, pp)?,
+            None => self.build_command(task, &chunk)?,
+        };
 
         chunk::run(invocation, chunk, sink).await
     }

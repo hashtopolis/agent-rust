@@ -1,5 +1,5 @@
 use crate::cracker::CrackerError;
-use crate::model::{BenchmarkType, TaskAssignment};
+use crate::model::{BenchmarkType, ResolvedPreprocessor, TaskAssignment};
 use crate::process;
 
 use crate::backend::args::Args;
@@ -11,11 +11,11 @@ use super::status::{self, HashcatStatus};
 pub(super) async fn run(
     cracker: &HashcatCracker,
     task: &TaskAssignment,
-    _measured_keyspace: Option<u64>,
+    preprocessor: Option<&ResolvedPreprocessor>,
 ) -> Result<Option<String>, CrackerError> {
     match task.bench_type {
-        BenchmarkType::Speed => run_speed(cracker, task).await,
-        BenchmarkType::Run => run_runtime(cracker, task).await,
+        BenchmarkType::Speed => run_speed(cracker, task, preprocessor).await,
+        BenchmarkType::Run => run_runtime(cracker, task, preprocessor).await,
     }
 }
 
@@ -24,6 +24,7 @@ pub(super) async fn run(
 async fn run_runtime(
     cracker: &HashcatCracker,
     task: &TaskAssignment,
+    preprocessor: Option<&ResolvedPreprocessor>,
 ) -> Result<Option<String>, CrackerError> {
     let hashlist = cracker.hashlist_file(task.hashlist_id);
 
@@ -39,6 +40,7 @@ async fn run_runtime(
             "\t",
         ])
         .args(cracker.resolve_attack(&task.attack_command, &task.hashlist_alias, Some(&hashlist)))
+        .arg_if(preprocessor.is_some(), "example.dict")
         .args(argv::split_parameters(&task.cmd_parameters))
         .arg("-o")
         .arg(argv::path_arg(&cracker.hashlist_outfile(task.hashlist_id)))
@@ -76,6 +78,7 @@ async fn run_runtime(
 async fn run_speed(
     cracker: &HashcatCracker,
     task: &TaskAssignment,
+    preprocessor: Option<&ResolvedPreprocessor>,
 ) -> Result<Option<String>, CrackerError> {
     let hashlist = cracker.hashlist_file(task.hashlist_id);
 
@@ -91,6 +94,10 @@ async fn run_speed(
             "\t",
         ])
         .args(cracker.resolve_attack(&task.attack_command, &task.hashlist_alias, Some(&hashlist)))
+        // A preprocessor task has no wordlist of its own (candidates would come from
+        // the pipe), so the benchmark stands one in from the cracker directory.
+        // (example.dict is part of standard hashcat distribution)
+        .arg_if(preprocessor.is_some(), "example.dict")
         .args(argv::split_parameters(&task.cmd_parameters))
         .arg_if(task.brain.is_some(), "-S")
         .arg("-o")

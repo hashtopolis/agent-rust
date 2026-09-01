@@ -112,7 +112,9 @@ pub(crate) enum Request {
         token: String,
         #[serde(rename = "taskId")]
         task_id: u64,
-        keyspace: u64,
+        // `i64` so a preprocessor can report `-1` (no keyspace command, or a
+        // keyspace too large to represent); the server special-cases that value.
+        keyspace: i64,
     },
 
     #[serde(rename = "sendBenchmark")]
