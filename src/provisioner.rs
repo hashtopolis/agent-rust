@@ -1,10 +1,14 @@
 //! Getting bytes onto disk which [`Client`] does not cover.
 
+use std::io;
+use std::path::{Path, PathBuf};
+
 use thiserror::Error;
 
+use crate::archive::{self, ArchiveError};
 use crate::client::{Client, ClientError};
 use crate::config::Paths;
-use crate::cracker::{AnyCracker, Cracker};
+use crate::cracker::{AnyCracker, Cracker, CrackerKind, build_cracker};
 use crate::download::{DownloadError, Downloader};
 use crate::identity::{agent_type, agent_version};
 use crate::model::{CheckClientVersionResponse, Preprocessor};
@@ -16,6 +20,14 @@ pub enum ProvisionError {
     Client(#[from] ClientError),
     #[error(transparent)]
     Download(#[from] DownloadError),
+    #[error(transparent)]
+    Archive(#[from] ArchiveError),
+    #[error("filesystem error at {}: {source}", path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("{file} is {actual} bytes, server announced {expected}")]
     SizeMismatch {
         file: String,
@@ -68,7 +80,6 @@ pub trait Provisioner<T: Transport> {
     async fn check_client_version(&self, client: &Client<T>) -> Result<(), ProvisionError>;
 }
 
-#[allow(dead_code)]
 pub struct DiskProvisioner<D: Downloader> {
     paths: Paths,
     downloader: D,
@@ -86,20 +97,82 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
     async fn deletion_check(&self, client: &Client<T>) -> Result<(), ProvisionError> {
         let status = client.get_file_status().await?;
 
-        tracing::info!(
-            files = ?status.filenames,
-            "server file status received; local pruning not yet implemented"
-        );
+        for filename in &status.filenames {
+            // Anything beyond a bare name could resolve outside the files
+            // directory, so we refuse to act on it.
+            if !is_plain_filename(filename) {
+                tracing::warn!(file = %filename, "ignoring deletion request with a path in the file name");
+                continue;
+            }
+
+            let path = self.paths.files.join(filename);
+
+            if !path_exists(&path).await {
+                continue;
+            }
+
+            tracing::info!(file = %filename, "deleting file as requested by server");
+
+            // A wordlist archive leaves an extracted `.txt` behind, so the
+            // sibling goes with the archive.
+            if is_7z(&path) {
+                let extracted = path.with_extension("txt");
+
+                if path_exists(&extracted).await {
+                    remove_file(&extracted).await;
+                }
+            }
+
+            remove_file(&path).await;
+        }
 
         Ok(())
     }
 
+    /// Downloads and extracts the cracker on first use, then hands back a built
+    /// backend pointing at the executable. The server names the backend
+    /// (`hashcat` vs. a generic one) and the executable file within the archive.
     async fn ensure_cracker(
         &self,
-        _client: &Client<T>,
-        _cracker_id: u64,
+        client: &Client<T>,
+        cracker_id: u64,
     ) -> Result<AnyCracker, ProvisionError> {
-        todo!("Not yet implemented")
+        let info = client.download_cracker(cracker_id).await?;
+
+        // Absolute so the cracker still spawns once the run sets its cwd to this
+        // directory: a relative program would otherwise be resolved a second time
+        // against that cwd.
+        let cracker_dir = absolute(self.paths.crackers.join(cracker_id.to_string()));
+
+        if !cracker_dir.is_dir() {
+            let archive = self.paths.crackers.join(format!("{cracker_id}.7z"));
+            self.downloader.download(&info.url, &archive).await?;
+
+            let extract_dir = cracker_dir.clone();
+            let extract_archive = archive.clone();
+            spawn_extract(&archive, move || {
+                archive::extract_flattened(&extract_archive, &extract_dir)
+            })
+            .await?;
+
+            let _ = tokio::fs::remove_file(&archive).await;
+        }
+
+        let binary_path = cracker_dir.join(&info.binary);
+        make_executable(&binary_path).await?;
+
+        let kind = if info.name.eq_ignore_ascii_case("hashcat") {
+            CrackerKind::Hashcat
+        } else {
+            CrackerKind::Generic
+        };
+
+        Ok(build_cracker(
+            kind,
+            cracker_id,
+            binary_path,
+            self.paths.clone(),
+        ))
     }
 
     async fn ensure_preprocessor(
@@ -110,21 +183,69 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
         todo!("Not yet implemented")
     }
 
+    /// Fetches every task file that is not already present with the announced
+    /// size, extracting `.7z` archives (wordlists) once downloaded.
     async fn ensure_files(
         &self,
-        _client: &Client<T>,
-        _files: &[String],
-        _task_id: u64,
+        client: &Client<T>,
+        files: &[String],
+        task_id: u64,
     ) -> Result<(), ProvisionError> {
-        todo!("Not yet implemented")
+        for file in files {
+            let info = client.get_file(task_id, file).await?;
+
+            let dest = self.paths.files.join(file);
+            let extracted = dest.with_extension("txt");
+
+            if file_has_size(&dest, info.filesize).await {
+                tracing::debug!(file = %file, "already present with expected size; skipping");
+                continue;
+            }
+
+            if path_exists(&extracted).await {
+                tracing::debug!(file = %file, "extracted output already present; skipping");
+                continue;
+            }
+
+            tracing::debug!(file = %file, url = %info.url, size = info.filesize, "downloading task file");
+            self.downloader.download(&info.url, &dest).await?;
+
+            let actual = file_size(&dest).await;
+
+            if actual != info.filesize {
+                return Err(ProvisionError::SizeMismatch {
+                    file: file.clone(),
+                    expected: info.filesize,
+                    actual,
+                });
+            }
+
+            if is_7z(&dest) && !path_exists(&extracted).await {
+                let files_dir = self.paths.files.clone();
+                let extract_archive = dest.clone();
+                spawn_extract(&dest, move || {
+                    archive::extract_into(&extract_archive, &files_dir)
+                })
+                .await?;
+            }
+        }
+
+        Ok(())
     }
 
+    /// The hashlist is re-fetched on every task change, so it is always written
+    /// fresh rather than size-checked.
     async fn ensure_hashlist(
         &self,
-        _client: &Client<T>,
-        _hashlist_id: u64,
+        client: &Client<T>,
+        hashlist_id: u64,
     ) -> Result<(), ProvisionError> {
-        todo!("Not yet implemented")
+        let info = client.get_hashlist(hashlist_id).await?;
+
+        let dest = self.paths.hashlists.join(hashlist_id.to_string());
+        self.downloader.download(&info.url, &dest).await?;
+
+        Ok(())
     }
 
     /// The potfile lands in the cracker's own directory, which is where hashcat
@@ -152,5 +273,118 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
         }
 
         Ok(())
+    }
+}
+
+/// Run a blocking extraction off the async runtime. A panic in the extractor
+/// surfaces as an [`io::Error`] against the archive rather than unwinding the
+/// agent loop.
+async fn spawn_extract(
+    archive: &Path,
+    extract: impl FnOnce() -> Result<(), ArchiveError> + Send + 'static,
+) -> Result<(), ProvisionError> {
+    let archive = archive.to_path_buf();
+
+    tokio::task::spawn_blocking(extract)
+        .await
+        .map_err(|source| ProvisionError::Io {
+            path: archive,
+            source: io::Error::other(source),
+        })??;
+
+    Ok(())
+}
+
+/// Mark a freshly extracted cracker binary executable. Extraction does not
+/// always preserve the archived mode bits, so the agent sets them itself.
+async fn make_executable(path: &Path) -> Result<(), ProvisionError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = tokio::fs::metadata(path).await.map_err(io_at(path))?;
+
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(permissions.mode() | 0o111);
+
+        tokio::fs::set_permissions(path, permissions)
+            .await
+            .map_err(io_at(path))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+
+    Ok(())
+}
+
+async fn file_has_size(path: &Path, expected: u64) -> bool {
+    matches!(tokio::fs::metadata(path).await, Ok(m) if m.len() == expected)
+}
+
+async fn file_size(path: &Path) -> u64 {
+    tokio::fs::metadata(path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+async fn path_exists(path: &Path) -> bool {
+    tokio::fs::try_exists(path).await.unwrap_or(false)
+}
+
+/// A failed delete is logged rather than aborting the sweep: the next check
+/// will retry, and one stuck file should not block the rest.
+async fn remove_file(path: &Path) {
+    if let Err(error) = tokio::fs::remove_file(path).await {
+        tracing::warn!(path = %path.display(), %error, "failed to delete file");
+    }
+}
+
+/// A bare file name with no separator or parent reference. This is what keeps a
+/// server-supplied name from resolving outside the files directory. Both
+/// separators are rejected regardless of platform, matching the reference agent.
+fn is_plain_filename(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['/', '\\']) && name != "." && name != ".."
+}
+
+fn is_7z(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("7z"))
+}
+
+/// Make `path` absolute without touching the filesystem, falling back to the
+/// original on the (platform-specific) error paths.
+fn absolute(path: PathBuf) -> PathBuf {
+    std::path::absolute(&path).unwrap_or(path)
+}
+
+#[cfg(unix)]
+fn io_at(path: &Path) -> impl FnOnce(io::Error) -> ProvisionError {
+    let path = path.to_path_buf();
+
+    move |source| ProvisionError::Io { path, source }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_plain_filename;
+
+    #[test]
+    fn plain_names_are_accepted() {
+        assert!(is_plain_filename("wordlist.7z"));
+        assert!(is_plain_filename("rockyou.txt"));
+    }
+
+    #[test]
+    fn names_that_could_escape_the_files_directory_are_rejected() {
+        assert!(!is_plain_filename(""));
+        assert!(!is_plain_filename("../secret"));
+        assert!(!is_plain_filename("sub/dir.txt"));
+        assert!(!is_plain_filename("sub\\dir.txt"));
+        assert!(!is_plain_filename("/etc/passwd"));
+        assert!(!is_plain_filename(".."));
     }
 }

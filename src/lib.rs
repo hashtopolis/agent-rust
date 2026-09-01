@@ -2,6 +2,7 @@
 #![warn(clippy::self_named_module_files)]
 
 pub mod agent;
+pub mod archive;
 pub mod backend;
 pub mod cli;
 pub mod client;

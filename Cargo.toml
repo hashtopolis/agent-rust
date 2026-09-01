@@ -27,6 +27,7 @@ anyhow = "1.0.104"
 sysinfo = "0.39.6"
 pci-info = "0.4.0"
 pci-ids = "0.2.6"
+sevenz-rust2 = "0.21.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

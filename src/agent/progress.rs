@@ -16,13 +16,55 @@ impl<T: Transport> ProgressSink for ClientSink<'_, T> {
         &self,
         report: ProgressReport,
     ) -> Result<ProgressCommand, ProgressUpdateError> {
+        let new_cracks = report.cracks.len();
+
+        tracing::debug!(
+            chunk_id = self.chunk_id,
+            keyspace_progress = report.keyspace_progress,
+            relative_progress = report.relative_progress,
+            speed = report.speed,
+            state = report.state,
+            new_cracks,
+            "reporting progress"
+        );
+
         let response = self.client.send_progress(report).await;
 
         match response {
-            Ok(SendProgressResponse::Continue { zaps, .. }) => {
+            Ok(SendProgressResponse::Continue {
+                zaps,
+                cracked,
+                skipped,
+            }) => {
+                if new_cracks > 0 {
+                    tracing::info!(
+                        chunk_id = self.chunk_id,
+                        new_cracks,
+                        cracked,
+                        "chunk cracked hashes"
+                    );
+                }
+
+                tracing::debug!(
+                    chunk_id = self.chunk_id,
+                    cracked,
+                    skipped,
+                    zaps = zaps.len(),
+                    "progress accepted"
+                );
+
                 Ok(ProgressCommand::Continue { zaps })
             }
-            Ok(SendProgressResponse::Stop { .. }) => Ok(ProgressCommand::Stop),
+            Ok(SendProgressResponse::Stop { cracked, skipped }) => {
+                tracing::info!(
+                    chunk_id = self.chunk_id,
+                    cracked,
+                    skipped,
+                    "server signalled chunk stop"
+                );
+
+                Ok(ProgressCommand::Stop)
+            }
             // The server refused the update (chunk aborted, manually interrupted,
             // agent marked inactive, token rejected): stop and let the loop
             // re-sync with a fresh task.
@@ -40,6 +82,14 @@ impl<T: Transport> ProgressSink for ClientSink<'_, T> {
     }
 
     async fn report_error(&self, message: impl Into<String>) {
+        let message = message.into();
+
+        tracing::warn!(
+            chunk_id = self.chunk_id,
+            message = %message,
+            "reporting cracker error to server"
+        );
+
         let response = self
             .client
             .client_error(self.task_id, Some(self.chunk_id), message)

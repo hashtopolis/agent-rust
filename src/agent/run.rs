@@ -244,8 +244,21 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                     chunk_id: chunk.id,
                 };
 
+                tracing::info!(
+                    chunk_id = chunk.id,
+                    skip = chunk.skip,
+                    length = chunk.length,
+                    "running chunk"
+                );
+
                 match cracker.run_chunk(&task, chunk, &sink).await {
                     Ok(outcome) => {
+                        tracing::info!(
+                            chunk_id = chunk.id,
+                            stopped = outcome.stopped,
+                            "chunk finished"
+                        );
+
                         if outcome.stopped {
                             state.reset_task();
                             state.invalidate_setup();
