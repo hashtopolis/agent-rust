@@ -70,7 +70,12 @@ mod tests {
             ..Default::default()
         };
 
-        let cracker = HashcatCracker::new(0, PathBuf::from("/opt/hashcat/hashcat"), paths);
+        let cracker = HashcatCracker {
+            cracker_id: 1,
+            binary_path: PathBuf::from("/opt/hashcat/hashcat"),
+            paths,
+            progress_mode: super::super::progress::ProgressMode::Absolute,
+        };
 
         (dir, cracker)
     }

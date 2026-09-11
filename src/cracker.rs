@@ -17,6 +17,8 @@ pub enum CrackerError {
     Process(String),
     #[error("unparsable cracker status: {0}")]
     UnparsableStatus(String),
+    #[error("{0}")]
+    Other(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,14 +112,18 @@ pub enum AnyCracker {
     Generic(GenericCracker),
 }
 
-pub fn build_cracker(
+pub async fn build_cracker(
     kind: CrackerKind,
     cracker_id: CrackerId,
     binary_path: PathBuf,
     paths: crate::config::Paths,
-) -> AnyCracker {
-    match kind {
-        CrackerKind::Hashcat => HashcatCracker::new(cracker_id, binary_path, paths).into(),
+) -> Result<AnyCracker, CrackerError> {
+    let cracker = match kind {
+        CrackerKind::Hashcat => HashcatCracker::new(cracker_id, binary_path, paths)
+            .await?
+            .into(),
         CrackerKind::Generic => GenericCracker::new(cracker_id, binary_path, paths).into(),
-    }
+    };
+
+    Ok(cracker)
 }

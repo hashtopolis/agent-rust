@@ -18,23 +18,31 @@ use crate::backend::args::Args;
 use argv::path_arg;
 
 /// Modern hashcat (v6+) crack-record format `hash:plain:hex_plain:crack_pos`.
-/// Deferred: the old `15` format for pre-6.0 binaries, which needs version
-/// detection at construction.
+/// The old `15` format for pre-6.0 binaries is not supported yet.
 pub(super) const OUTFILE_FORMAT: &str = "1,2,3,4";
 
 pub struct HashcatCracker {
     cracker_id: CrackerId,
     binary_path: PathBuf,
     paths: Paths,
+    progress_mode: progress::ProgressMode,
 }
 
 impl HashcatCracker {
-    pub fn new(cracker_id: CrackerId, binary_path: PathBuf, paths: Paths) -> Self {
-        Self {
+    #[tracing::instrument(skip_all, fields(cracker_id = cracker_id))]
+    pub async fn new(
+        cracker_id: CrackerId,
+        binary_path: PathBuf,
+        paths: Paths,
+    ) -> Result<Self, CrackerError> {
+        let progress_mode = progress::ProgressMode::detect(&binary_path).await?;
+
+        Ok(Self {
             cracker_id,
             binary_path,
             paths,
-        }
+            progress_mode,
+        })
     }
 
     /// Assemble the argv and paths for a plain (non-preprocessor) chunk run. The
@@ -137,6 +145,7 @@ impl Cracker for HashcatCracker {
         benchmark::run(self, task, preprocessor).await
     }
 
+    #[tracing::instrument(skip_all, fields(cracker_id = self.cracker_id))]
     async fn run_chunk<S: ProgressSink>(
         &self,
         task: &TaskAssignment,
@@ -149,11 +158,7 @@ impl Cracker for HashcatCracker {
             None => self.build_command(task, &chunk)?,
         };
 
-        // The PROGRESS convention is a property of this binary, so its detection
-        // is shared across every chunk of the cracker rather than re-run per chunk.
-        let calibration = progress::calibration_for(self.cracker_id);
-
-        chunk::run(invocation, chunk, calibration, sink).await
+        chunk::run(invocation, chunk, self.progress_mode, sink).await
     }
 
     async fn run_health_check(

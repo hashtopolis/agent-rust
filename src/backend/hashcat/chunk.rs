@@ -9,7 +9,7 @@ use crate::model::{Chunk, ProgressReport};
 use crate::process::{self, ProcessSpec};
 
 use super::HashcatInvocation;
-use super::progress::{ProgressCalibration, ProgressScaler};
+use super::progress::ProgressMode;
 use super::status::{self, HashcatStatus};
 
 const CHANNEL_CAPACITY: usize = 256;
@@ -22,7 +22,7 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 pub(super) async fn run<S: ProgressSink>(
     invocation: HashcatInvocation,
     chunk: Chunk,
-    calibration: ProgressCalibration,
+    progress_mode: ProgressMode,
     sink: &S,
 ) -> Result<ChunkOutcome, CrackerError> {
     prepare_outfile(&invocation.outfile).await?;
@@ -87,7 +87,7 @@ pub(super) async fn run<S: ProgressSink>(
     );
     keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    let mut state = ChunkRun::new(chunk, invocation.preprocessor.is_some(), calibration);
+    let mut state = ChunkRun::new(chunk, invocation.preprocessor.is_some(), progress_mode);
 
     loop {
         tokio::select! {
@@ -185,11 +185,11 @@ struct ChunkRun {
     last_progress: Option<Progress>,
     first_status: bool,
     stopped: bool,
-    progress: ProgressScaler,
+    progress: ProgressMode,
 }
 
 impl ChunkRun {
-    fn new(chunk: Chunk, piped: bool, calibration: ProgressCalibration) -> Self {
+    fn new(chunk: Chunk, piped: bool, progress: ProgressMode) -> Self {
         Self {
             chunk,
             piped,
@@ -197,7 +197,7 @@ impl ChunkRun {
             last_progress: None,
             first_status: false,
             stopped: false,
-            progress: ProgressScaler::new(calibration),
+            progress,
         }
     }
 

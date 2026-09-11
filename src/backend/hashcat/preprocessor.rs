@@ -113,7 +113,12 @@ mod tests {
             ..Default::default()
         };
 
-        HashcatCracker::new(1, dir.path().join("crackers/1/hashcat.bin"), paths)
+        HashcatCracker {
+            cracker_id: 1,
+            binary_path: dir.path().join("crackers/1/hashcat.bin"),
+            paths,
+            progress_mode: super::super::progress::ProgressMode::Absolute,
+        }
     }
 
     fn task() -> TaskAssignment {

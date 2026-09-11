@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::archive::{self, ArchiveError};
 use crate::client::{Client, ClientError};
 use crate::config::Paths;
-use crate::cracker::{AnyCracker, Cracker, CrackerKind, build_cracker};
+use crate::cracker::{AnyCracker, Cracker, CrackerError, CrackerKind, build_cracker};
 use crate::download::{DownloadError, Downloader};
 use crate::identity::{agent_type, agent_version};
 use crate::model::{CheckClientVersionResponse, CrackerId, Preprocessor, ResolvedPreprocessor};
@@ -22,6 +22,8 @@ pub enum ProvisionError {
     Download(#[from] DownloadError),
     #[error(transparent)]
     Archive(#[from] ArchiveError),
+    #[error(transparent)]
+    Cracker(#[from] CrackerError),
     #[error("filesystem error at {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -167,12 +169,9 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
             CrackerKind::Generic
         };
 
-        Ok(build_cracker(
-            kind,
-            cracker_id,
-            binary_path,
-            self.paths.clone(),
-        ))
+        let cracker = build_cracker(kind, cracker_id, binary_path, self.paths.clone()).await?;
+
+        Ok(cracker)
     }
 
     /// Downloads and extracts the preprocessor on first use, then hands back the
