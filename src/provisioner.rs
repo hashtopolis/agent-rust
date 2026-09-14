@@ -1,7 +1,7 @@
 //! Getting bytes onto disk which [`Client`] does not cover.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
@@ -375,7 +375,7 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
                 // On success the process re-execs and never returns here; a
                 // failure must not stop the agent, so it is logged and swallowed.
                 if let Err(error) = update::apply(&self.downloader, &url).await {
-                    tracing::error!(%error, "self-update failed; staying on the current version");
+                    tracing::error!(%error, "self-update failed");
                 }
             }
         }
@@ -491,9 +491,15 @@ async fn remove_file(path: &Path) {
 
 /// A bare file name with no separator or parent reference. This is what keeps a
 /// server-supplied name from resolving outside the files directory. Both
-/// separators are rejected regardless of platform, matching the reference agent.
+/// separators and colons are rejected regardless of platform, including Windows
+/// drive-relative paths (`C:file`) and alternate data streams (`file:stream`).
 fn is_plain_filename(name: &str) -> bool {
-    !name.is_empty() && !name.contains(['/', '\\']) && name != "." && name != ".."
+    if name.contains(['/', '\\', ':']) {
+        return false;
+    }
+
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 fn is_7z(path: &Path) -> bool {
@@ -557,6 +563,10 @@ mod tests {
         assert!(!is_plain_filename("sub\\dir.txt"));
         assert!(!is_plain_filename("/etc/passwd"));
         assert!(!is_plain_filename(".."));
+        assert!(!is_plain_filename("."));
+        assert!(!is_plain_filename("C:state.json"));
+        assert!(!is_plain_filename("C:"));
+        assert!(!is_plain_filename("wordlist.txt:stream"));
     }
 
     #[tokio::test]
@@ -651,7 +661,15 @@ mod tests {
         let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, PanicDownloader);
         let client = Client::new(PanicTransport);
 
-        for name in ["../evil", "/etc/cron.d/evil", "sub/evil", ".."] {
+        for name in [
+            "../evil",
+            "/etc/cron.d/evil",
+            "sub/evil",
+            "..",
+            "C:state.json",
+            "C:",
+            "wordlist.txt:stream",
+        ] {
             let error = provisioner
                 .ensure_files(&client, &[name.to_owned()], 1)
                 .await
