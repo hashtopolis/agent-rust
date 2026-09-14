@@ -1,7 +1,7 @@
 //! Getting bytes onto disk which [`Client`] does not cover.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
@@ -13,6 +13,7 @@ use crate::download::{DownloadError, Downloader};
 use crate::identity::{agent_type, agent_version};
 use crate::model::{CheckClientVersionResponse, CrackerId, Preprocessor, ResolvedPreprocessor};
 use crate::transport::Transport;
+use crate::update;
 
 #[derive(Debug, Error)]
 pub enum ProvisionError {
@@ -36,6 +37,8 @@ pub enum ProvisionError {
         expected: u64,
         actual: u64,
     },
+    #[error("refusing task file name {file:?}: not a plain filename")]
+    UnsafeFileName { file: String },
     #[error("no hashcat.osx in the cracker archive and cracker.hashcat_path is not set")]
     HashcatFallbackMissing,
     #[error("cracker.hashcat_path is not a usable hashcat binary or install: {}", path.display())]
@@ -283,6 +286,14 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
         task_id: u64,
     ) -> Result<(), ProvisionError> {
         for file in files {
+            // The server names these files; a name carrying a path separator or
+            // `..` would let `paths.files.join` land the download outside the
+            // files directory (an absolute name replaces it outright), so refuse
+            // anything that is not a bare filename before fetching it.
+            if !is_plain_filename(file) {
+                return Err(ProvisionError::UnsafeFileName { file: file.clone() });
+            }
+
             let info = client.get_file(task_id, file).await?;
 
             let dest = self.paths.files.join(file);
@@ -359,7 +370,13 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
                 tracing::info!("client version is up to date")
             }
             CheckClientVersionResponse::NewVersion { url } => {
-                tracing::info!(%url, "new client version available; self-update not yet implemented")
+                tracing::info!(%url, "new client version available; updating");
+
+                // On success the process re-execs and never returns here; a
+                // failure must not stop the agent, so it is logged and swallowed.
+                if let Err(error) = update::apply(&self.downloader, &url).await {
+                    tracing::error!(%error, "self-update failed");
+                }
             }
         }
 
@@ -474,9 +491,15 @@ async fn remove_file(path: &Path) {
 
 /// A bare file name with no separator or parent reference. This is what keeps a
 /// server-supplied name from resolving outside the files directory. Both
-/// separators are rejected regardless of platform, matching the reference agent.
+/// separators and colons are rejected regardless of platform, including Windows
+/// drive-relative paths (`C:file`) and alternate data streams (`file:stream`).
 fn is_plain_filename(name: &str) -> bool {
-    !name.is_empty() && !name.contains(['/', '\\']) && name != "." && name != ".."
+    if name.contains(['/', '\\', ':']) {
+        return false;
+    }
+
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 fn is_7z(path: &Path) -> bool {
@@ -499,8 +522,18 @@ fn io_at(path: &Path) -> impl FnOnce(io::Error) -> ProvisionError {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute, is_plain_filename, resolve_local_hashcat, with_bitness};
+    use super::{
+        DiskProvisioner, ProvisionError, Provisioner, absolute, is_plain_filename,
+        resolve_local_hashcat, with_bitness,
+    };
+    use crate::client::Client;
+    use crate::config::Paths;
+    use crate::download::{DownloadError, Downloader};
+    use crate::transport::{Transport, TransportError};
 
+    use std::path::Path;
+
+    use serde_json::Value;
     use tempfile::TempDir;
 
     #[test]
@@ -530,6 +563,10 @@ mod tests {
         assert!(!is_plain_filename("sub\\dir.txt"));
         assert!(!is_plain_filename("/etc/passwd"));
         assert!(!is_plain_filename(".."));
+        assert!(!is_plain_filename("."));
+        assert!(!is_plain_filename("C:state.json"));
+        assert!(!is_plain_filename("C:"));
+        assert!(!is_plain_filename("wordlist.txt:stream"));
     }
 
     #[tokio::test]
@@ -588,5 +625,63 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    /// A transport and downloader that fail the test if the guard ever lets a
+    /// request or write through for a rejected name.
+    struct PanicTransport;
+
+    impl Transport for PanicTransport {
+        async fn post_json(&self, _body: &Value) -> Result<Value, TransportError> {
+            panic!("ensure_files must reject an unsafe name before contacting the server");
+        }
+    }
+
+    struct PanicDownloader;
+
+    impl Downloader for PanicDownloader {
+        async fn download(&self, _url: &str, _dest: &Path) -> Result<(), DownloadError> {
+            panic!("ensure_files must reject an unsafe name before downloading");
+        }
+    }
+
+    fn paths_in(root: &Path) -> Paths {
+        Paths {
+            files: root.join("files"),
+            crackers: root.join("crackers"),
+            hashlists: root.join("hashlists"),
+            preprocessors: root.join("preprocessors"),
+            zaps: root.join("zaps"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_files_rejects_a_name_that_escapes_the_files_directory() {
+        let tmp = TempDir::new().unwrap();
+        let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, PanicDownloader);
+        let client = Client::new(PanicTransport);
+
+        for name in [
+            "../evil",
+            "/etc/cron.d/evil",
+            "sub/evil",
+            "..",
+            "C:state.json",
+            "C:",
+            "wordlist.txt:stream",
+        ] {
+            let error = provisioner
+                .ensure_files(&client, &[name.to_owned()], 1)
+                .await
+                .expect_err("an unsafe file name must be refused");
+
+            assert!(
+                matches!(&error, ProvisionError::UnsafeFileName { file } if file == name),
+                "expected UnsafeFileName for {name:?}, got {error:?}"
+            );
+        }
+
+        // Nothing should have been written to the files directory.
+        assert!(!tmp.path().join("files").join("evil").exists());
     }
 }
