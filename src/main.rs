@@ -52,8 +52,15 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
+    let hashcat_path = config.settings().cracker.hashcat_path.clone();
+
+    if hashcat_path.is_some() && !cfg!(target_os = "macos") {
+        tracing::warn!("hashcat_path is only used on macOS; ignoring it on this platform");
+    }
+
     let downloader = HttpDownloader::new(reqwest::Client::new(), transport.url());
-    let provisioner = DiskProvisioner::new(config.settings().paths.clone(), downloader);
+    let provisioner =
+        DiskProvisioner::new(config.settings().paths.clone(), hashcat_path, downloader);
 
     let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
     agent.run().await?;
