@@ -1,6 +1,6 @@
 //! Configuration split over two files with different owners: `config.json` is
-//! user-owned and only ever read (so it is safe to reload every loop iteration),
-//! while `state.json` is agent-owned and rewritten when the token or uuid change.
+//! user-owned and read once at startup, while `state.json` is agent-owned and
+//! rewritten when the token or uuid change.
 
 use std::fs;
 use std::io;
@@ -158,7 +158,7 @@ pub struct State {
     pub uuid: Option<String>,
 }
 
-/// Never written back; re-applied after every reload so a flag keeps winning.
+/// Never written back; applied once at load so a flag wins over the file.
 #[derive(Debug, Clone, Default)]
 pub struct Overrides {
     pub url: Option<String>,
@@ -219,7 +219,6 @@ impl Overrides {
 pub struct Config {
     settings_path: PathBuf,
     state_path: PathBuf,
-    overrides: Overrides,
     settings: Settings,
     state: State,
 }
@@ -243,20 +242,9 @@ impl Config {
         Ok(Self {
             settings_path,
             state_path,
-            overrides,
             settings,
             state,
         })
-    }
-
-    /// Leaves the state untouched, so a live session's token cannot change under
-    /// it.
-    pub fn reload_settings(&mut self) -> Result<(), ConfigError> {
-        let mut settings = read_settings(&self.settings_path)?;
-        self.overrides.apply(&mut settings);
-        self.settings = settings;
-
-        Ok(())
     }
 
     pub fn settings(&self) -> &Settings {
@@ -530,47 +518,6 @@ mod tests {
             config.settings().paths.files,
             PathBuf::from("/scratch/files")
         );
-    }
-
-    #[test]
-    fn overrides_are_reapplied_after_reload() {
-        let fixture = Fixture::new();
-        fixture.write_settings(
-            r#"{ "server": { "url": "https://from-file.example/api/server.php" } }"#,
-        );
-        let mut config = fixture
-            .load(Overrides {
-                url: Some("https://from-cli.example/api/server.php".to_string()),
-                ..Overrides::default()
-            })
-            .unwrap();
-
-        fixture.write_settings(
-            r#"{
-                "server": { "url": "https://edited.example/api/server.php" },
-                "behavior": { "piping_threshold": 42 }
-            }"#,
-        );
-        config.reload_settings().unwrap();
-
-        assert_eq!(config.settings().behavior.piping_threshold, 42);
-        assert_eq!(
-            config.require_url().unwrap(),
-            "https://from-cli.example/api/server.php",
-            "the CLI override must keep winning after a reload"
-        );
-    }
-
-    #[test]
-    fn reload_does_not_touch_the_token() {
-        let fixture = Fixture::new();
-        let mut config = fixture.load(Overrides::default()).unwrap();
-        config.set_token("GHhgdf(/&").unwrap();
-
-        fixture.write_settings(r#"{ "server": { "url": "https://example.com/api/server.php" } }"#);
-        config.reload_settings().unwrap();
-
-        assert_eq!(config.token(), Some("GHhgdf(/&"));
     }
 
     #[test]
