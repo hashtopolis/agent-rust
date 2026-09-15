@@ -181,16 +181,22 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
 
             self.maybe_check_version().await;
 
+            // Brain runs consult a found-hashes file; the cracker owns where it
+            // wants that staged (hashcat's potfile), and the provisioner just
+            // downloads to it. A cracker that has no such file skips this.
             if task.brain.is_some()
-                && let Err(error) = self
-                    .provisioner
-                    .ensure_found(&self.client, task.hashlist_id, task.cracker_id)
-                    .await
+                && let Some(dest) = cracker.found_hashes_path()
             {
-                tracing::warn!(%error, "failed to load found hashes");
-                state.reset_task();
+                if let Err(error) = self
+                    .provisioner
+                    .ensure_found(&self.client, task.hashlist_id, &dest)
+                    .await
+                {
+                    tracing::warn!(%error, "failed to load found hashes");
+                    state.reset_task();
 
-                return Ok(Step::Sleep(RETRY_DELAY));
+                    return Ok(Step::Sleep(RETRY_DELAY));
+                }
             }
 
             state.prepared_task_id = Some(task.task_id);

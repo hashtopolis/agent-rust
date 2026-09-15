@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "htp-agent"
 path = "src/main.rs"
 
+[lints.clippy]
+# Collapsing a guard into a let-chain hurts readability; we prefer nested ifs.
+collapsible_if = "allow"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = [

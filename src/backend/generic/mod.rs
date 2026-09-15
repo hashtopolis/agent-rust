@@ -59,4 +59,8 @@ impl Cracker for GenericCracker {
     ) -> Result<HealthCheckOutcome, CrackerError> {
         todo!("generic health check")
     }
+
+    fn found_hashes_path(&self) -> Option<PathBuf> {
+        None
+    }
 }

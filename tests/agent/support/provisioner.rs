@@ -4,7 +4,7 @@ use htp_agent::client::Client;
 use htp_agent::cracker::{
     ChunkOutcome, Cracker, CrackerError, HealthCheckOutcome, ProgressCommand, ProgressSink,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use htp_agent::model::{Chunk, Preprocessor, ProgressReport, ResolvedPreprocessor, TaskAssignment};
 use htp_agent::provisioner::{ProvisionError, Provisioner};
@@ -66,6 +66,12 @@ impl Cracker for FakeCracker {
             num_cracked: 1,
             ..HealthCheckOutcome::default()
         })
+    }
+
+    /// Return a path so a brain task still exercises `ensure_found`; the loop only
+    /// asks for this when `task.brain` is set.
+    fn found_hashes_path(&self) -> Option<PathBuf> {
+        Some(PathBuf::from("found.potfile"))
     }
 }
 
@@ -197,7 +203,7 @@ impl<T: Transport> Provisioner<T> for FakeProvisioner {
         &self,
         _client: &Client<T>,
         _hashlist_id: u64,
-        _cracker_id: u64,
+        _dest: &Path,
     ) -> Result<(), ProvisionError> {
         self.enter(Stage::Found)
     }
