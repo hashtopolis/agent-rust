@@ -7,6 +7,7 @@ use tokio::time::MissedTickBehavior;
 use crate::cracker::{ChunkOutcome, CrackerError, ProgressCommand, ProgressSink};
 use crate::model::{Chunk, ProgressReport};
 use crate::process::{self, ProcessSpec};
+use crate::sysinfo::CpuSampler;
 
 use super::HashcatInvocation;
 use super::progress::ProgressMode;
@@ -175,6 +176,7 @@ struct Progress {
     state: u32,
     gpu_temp: Option<Vec<i64>>,
     gpu_util: Option<Vec<i64>>,
+    cpu_util: Option<Vec<f64>>,
 }
 
 /// Mutable state carried across the run loop's iterations.
@@ -186,6 +188,7 @@ struct ChunkRun {
     first_status: bool,
     stopped: bool,
     progress: ProgressMode,
+    cpu: CpuSampler,
 }
 
 impl ChunkRun {
@@ -198,6 +201,7 @@ impl ChunkRun {
             first_status: false,
             stopped: false,
             progress,
+            cpu: CpuSampler::new(),
         }
     }
 
@@ -255,6 +259,10 @@ impl ChunkRun {
             status.curku()
         };
 
+        // hashcat reports GPU temperature and utilisation but not host CPU load,
+        // so we sample it here, once per status update.
+        let cpu_util = Some(vec![self.cpu.sample()]);
+
         Progress {
             keyspace_progress,
             relative_progress,
@@ -262,6 +270,7 @@ impl ChunkRun {
             state: status.state(),
             gpu_temp: (!temps.is_empty()).then(|| temps.to_vec()),
             gpu_util: (!utils.is_empty()).then(|| utils.to_vec()),
+            cpu_util,
         }
     }
 
@@ -303,6 +312,7 @@ impl ChunkRun {
                 cracks,
                 gpu_temp: progress.gpu_temp.clone(),
                 gpu_util: progress.gpu_util.clone(),
+                cpu_util: progress.cpu_util.clone(),
                 ..Default::default()
             };
 
@@ -425,5 +435,43 @@ async fn write_zaps(zap_dir: &Path, zaps: &[String]) {
 
     if let Err(error) = tokio::fs::write(&path, body).await {
         tracing::warn!(%error, path = %path.display(), "failed to write zaps");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_from_populates_cpu_util_and_keeps_gpu_fields() {
+        let line = "STATUS\t3\tSPEED\t100000\t1000\tEXEC_RUNTIME\t0.50\tCURKU\t2048\t\
+                    PROGRESS\t5000\t10000\tRECHASH\t0\t1\tRECSALT\t0\t1\t\
+                    TEMP\t60\tREJECTED\t0\tUTIL\t95";
+        let status = HashcatStatus::parse(line);
+
+        let mut run = ChunkRun::new(
+            Chunk {
+                id: 1,
+                skip: 0,
+                length: 10_000,
+            },
+            false,
+            ProgressMode::Absolute,
+        );
+
+        let progress = run.progress_from(&status);
+
+        // CPU utilisation is always reported, as a single-element list.
+        let cpu = progress.cpu_util.expect("cpu_util should be populated");
+        assert_eq!(cpu.len(), 1);
+        assert!(
+            (0.0..=100.0).contains(&cpu[0]),
+            "cpu out of range: {}",
+            cpu[0]
+        );
+
+        // GPU telemetry from the status line is unaffected.
+        assert_eq!(progress.gpu_temp.as_deref(), Some(&[60][..]));
+        assert_eq!(progress.gpu_util.as_deref(), Some(&[95][..]));
     }
 }
