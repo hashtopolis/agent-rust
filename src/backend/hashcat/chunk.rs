@@ -105,21 +105,22 @@ pub(super) async fn run<S: ProgressSink>(
             event = rx.recv() => {
                 let Some(event) = event else { break; };
 
-                match state.handle(event, sink, &invocation).await {
-                    Flow::Continue => {}
+                let terminate = match state.handle(event, sink, &invocation).await {
+                    Flow::Continue => false,
                     Flow::Stop => {
-                        process::kill_group(hashcat_pid);
-                        process::kill_group(producer_pid);
                         state.stopped = true;
-                        break;
+                        true
                     }
-                    // GPU starved: tear the run down and signal a self-pipe restart.
                     Flow::Repipe => {
-                        process::kill_group(hashcat_pid);
-                        process::kill_group(producer_pid);
                         state.repipe = true;
-                        break;
+                        true
                     }
+                };
+
+                if terminate {
+                    process::kill_group(hashcat_pid);
+                    process::kill_group(producer_pid);
+                    break;
                 }
             }
 
