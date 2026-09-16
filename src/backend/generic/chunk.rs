@@ -415,9 +415,8 @@ mod tests {
     async fn cracks_batch_at_the_limit() {
         // 1500 cracks buffered before a single status flushes them in batches of
         // at most 1000.
-        let (_dir, invocation) = emitting(
-            "for i in $(seq 1 1500); do echo 'h:p'; done; echo 'STATUS 5000 1000'",
-        );
+        let (_dir, invocation) =
+            emitting("for i in $(seq 1 1500); do echo 'h:p'; done; echo 'STATUS 5000 1000'");
         let sink = FakeSink::new();
 
         run(invocation, CHUNK, &sink).await.unwrap();
