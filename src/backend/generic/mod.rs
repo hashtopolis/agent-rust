@@ -16,10 +16,11 @@
 //!
 //! # Sub-commands
 //!
-//! - `keyspace <attack, with "-a <alias> " removed>`: measure keyspace. The
-//!   agent strips the `-a <alias> ` substring, then resolves the rest. The binary
-//!   prints the keyspace as an integer; the agent parses the last non-empty
-//!   stdout line. A value above `i64::MAX` is reported as unbounded.
+//! - `keyspace <attack, with the -a/alias pair removed>`: measure keyspace.
+//!   The agent drops the `-a` flag and its alias argument token-wise, then
+//!   resolves the rest. The binary prints the keyspace as an integer; the agent
+//!   parses the last non-empty stdout line. A value above `i64::MAX` is reported
+//!   as unbounded.
 //! - `crack ...`: run an attack (benchmark and chunk). The alias is replaced by
 //!   the absolute hashlist path; `-a` is kept.
 //!   - Benchmark argv: `crack <attack> -s 0 -l <keyspace> --timeout=<seconds>`.
@@ -49,7 +50,10 @@
 //! - `relativeProgress` = `progress` (basis points).
 //! - `speed` = `speed`.
 //! - `state` = 4 if `progress == 10000`, else 2.
-//! - `keyspaceProgress` = chunk `skip` (constant; no moving cursor).
+//! - `keyspaceProgress` = `skip + length * progress / 10000`, an absolute cursor
+//!   within the chunk. The reference agent pins this to `skip`; we compute it so
+//!   the server (which stores it as the chunk checkpoint) reports real task
+//!   progress and can trim the chunk on resume instead of restarting it.
 //! - `cracks` = those accumulated since the last update, batched ≤ 1000 per
 //!   request. Cracks arriving after the final status are flushed at process exit.
 //! - No GPU/CPU telemetry.
@@ -112,16 +116,23 @@ impl GenericCracker {
             .collect()
     }
 
-    /// Resolve the attack for a keyspace measure: first remove the `-a <alias> `
-    /// pair (the generic cracker's hash-file argument, which the `keyspace`
-    /// sub-command does not want), then resolve remaining file tokens.
+    /// Resolve the attack for a keyspace measure: drop the `-a <alias>` pair (the
+    /// generic cracker's hash-file argument, which the `keyspace` sub-command does
+    /// not want), then resolve remaining file tokens.
     fn resolve_keyspace_attack(&self, attack: &str, alias: &str) -> Vec<String> {
-        let stripped = attack.replace(&format!("-a {alias} "), "");
+        let mut tokens = attack.split_whitespace().peekable();
+        let mut args = Vec::new();
 
-        stripped
-            .split_whitespace()
-            .map(|token| self.resolve_file_token(token))
-            .collect()
+        while let Some(token) = tokens.next() {
+            if token == "-a" && tokens.peek() == Some(&alias) {
+                tokens.next();
+                continue;
+            }
+
+            args.push(self.resolve_file_token(token));
+        }
+
+        args
     }
 
     fn resolve_file_token(&self, token: &str) -> String {
@@ -288,5 +299,22 @@ mod tests {
         let args = cracker.resolve_keyspace_attack("-a #HL# wl.txt", ALIAS);
 
         assert_eq!(args, [seeded(&dir, "wl.txt")]);
+    }
+
+    #[test]
+    fn keyspace_attack_strips_the_pair_regardless_of_position_or_spacing() {
+        let (_dir, cracker) = cracker_with_files(&[]);
+
+        // The reference's substring replace misses both of these (alias at the
+        // end with no trailing space; a double space between flag and alias); the
+        // token-wise strip handles them.
+        assert_eq!(
+            cracker.resolve_keyspace_attack("?a?a?a -a #HL#", ALIAS),
+            ["?a?a?a"]
+        );
+        assert_eq!(
+            cracker.resolve_keyspace_attack("-a  #HL#  ?d?d", ALIAS),
+            ["?d?d"]
+        );
     }
 }

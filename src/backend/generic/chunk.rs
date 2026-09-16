@@ -199,6 +199,11 @@ impl ChunkRun {
     ) -> Flow {
         let mut first_batch = true;
 
+        // Absolute position within the chunk, derived from the basis-point
+        // progress. The server stores this as the chunk checkpoint and uses it
+        // for task progress accounting and to trim the chunk on resume.
+        let keyspace_progress = self.keyspace_progress(progress.relative_progress);
+
         while first_batch || !self.pending.is_empty() {
             first_batch = false;
 
@@ -211,11 +216,9 @@ impl ChunkRun {
                 .map(|line| Crack::Raw(line.clone()))
                 .collect();
 
-            // The generic cursor does not move: keyspaceProgress is pinned to the
-            // chunk's start offset, and relativeProgress carries the real figure.
             let report = ProgressReport {
                 chunk_id: self.chunk.id,
-                keyspace_progress: self.chunk.skip,
+                keyspace_progress,
                 relative_progress: progress.relative_progress,
                 speed: progress.speed,
                 state: progress.state,
@@ -254,6 +257,21 @@ impl ChunkRun {
         };
 
         let _ = self.flush(sink, zap_file, &progress).await;
+    }
+
+    /// The absolute keyspace position within the chunk for a given basis-point
+    /// progress: `skip + length * progress / 10000`. The reference agent pins this
+    /// to `skip` (a static cursor), which leaves generic tasks showing 0% until
+    /// completion and restarts whole chunks on resume; the server clamps this to
+    /// `skip + length`, treats it as the chunk checkpoint, and both accounts task
+    /// progress (`checkpoint - skip`) and trims resumed chunks against it. The
+    /// `u128` intermediate avoids overflow on large keyspaces; at 100% the result
+    /// is exactly `skip + length`.
+    fn keyspace_progress(&self, relative_progress: u64) -> u64 {
+        let advanced = (self.chunk.length as u128 * relative_progress as u128
+            / GenericStatus::COMPLETE as u128) as u64;
+
+        self.chunk.skip + advanced
     }
 
     /// A heartbeat sent before the first real status, pinned to the chunk's start
@@ -397,16 +415,16 @@ mod tests {
         let reports = sink.reports();
         assert_eq!(reports.len(), 2, "one report per status line");
 
-        // Every report pins keyspaceProgress to the chunk's start offset.
-        assert!(reports.iter().all(|r| r.keyspace_progress == CHUNK.skip));
-
-        // First status: mid-chunk, state 2, carrying the first crack unsplit.
+        // First status: mid-chunk, state 2, carrying the first crack unsplit. The
+        // cursor tracks progress: skip + length * 5000/10000 = 10 + 10.
         assert_eq!(reports[0].relative_progress, 5000);
+        assert_eq!(reports[0].keyspace_progress, CHUNK.skip + CHUNK.length / 2);
         assert_eq!(reports[0].state, 2);
         assert_eq!(reports[0].cracks, vec![Crack::Raw("h1:p1".to_owned())]);
 
-        // Final status: complete, state 4, carrying the second crack.
+        // Final status: complete, state 4, cursor at skip + length, second crack.
         assert_eq!(reports[1].relative_progress, 10000);
+        assert_eq!(reports[1].keyspace_progress, CHUNK.skip + CHUNK.length);
         assert_eq!(reports[1].state, 4);
         assert_eq!(reports[1].cracks, vec![Crack::Raw("h2:p2".to_owned())]);
     }

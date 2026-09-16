@@ -33,6 +33,14 @@ pub(super) async fn run(
         .await
         .map_err(|error| CrackerError::Process(error.to_string()))?;
 
+    if !captured.status.success() {
+        return Err(CrackerError::Process(format!(
+            "generic cracker benchmark exited with {}: {}",
+            captured.status,
+            captured.stderr.trim()
+        )));
+    }
+
     let last = captured
         .stdout
         .lines()

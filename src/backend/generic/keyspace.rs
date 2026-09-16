@@ -26,6 +26,16 @@ pub(super) async fn measure(
         .await
         .map_err(|error| CrackerError::Process(error.to_string()))?;
 
+    // The reference uses `subprocess.check_output`, which raises on a non-zero
+    // exit; mirror that strictness rather than parsing output from a failed run.
+    if !captured.status.success() {
+        return Err(CrackerError::Process(format!(
+            "generic cracker keyspace exited with {}: {}",
+            captured.status,
+            captured.stderr.trim()
+        )));
+    }
+
     // The reference keeps the last non-empty line and parses it; an empty output
     // defaults to zero.
     let last_line = captured
