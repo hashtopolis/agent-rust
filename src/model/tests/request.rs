@@ -1,5 +1,5 @@
 use crate::model::raw::{BinaryType, Request};
-use crate::model::{BenchmarkType, Os};
+use crate::model::{BenchmarkType, Crack, Os};
 use serde_json::json;
 
 #[test]
@@ -206,18 +206,18 @@ fn send_progress_omits_optional_telemetry() {
         speed: 570000,
         state: 3,
         cracks: vec![
-            vec![
+            Crack::Fields(vec![
                 "7fde65673fd28736423f23423786f".to_string(),
                 "thisisplain".to_string(),
                 "746869736973706c61696e".to_string(),
                 "787523889".to_string(),
-            ],
-            vec![
+            ]),
+            Crack::Fields(vec![
                 "7fde65673f28987f7423f2342378f".to_string(),
                 "otherplain".to_string(),
                 "6f74686572706c61696e".to_string(),
                 "78652".to_string(),
-            ],
+            ]),
         ],
         debug_output: None,
         gpu_temp: None,
@@ -240,6 +240,36 @@ fn send_progress_omits_optional_telemetry() {
                 ["7fde65673f28987f7423f2342378f", "otherplain", "6f74686572706c61696e", "78652"]
             ]
         })
+    );
+}
+
+#[test]
+fn send_progress_mixes_field_and_raw_cracks() {
+    // hashcat cracks are pre-split fields (JSON array); generic cracks are raw
+    // lines (JSON string). Both must be able to travel in one request, each in
+    // its own shape.
+    let req = Request::SendProgress {
+        token: "tok".to_string(),
+        chunk_id: 1,
+        keyspace_progress: 0,
+        relative_progress: 0,
+        speed: 0,
+        state: 2,
+        cracks: vec![
+            Crack::Fields(vec!["hash".to_string(), "plain".to_string()]),
+            Crack::Raw("otherhash:otherplain".to_string()),
+        ],
+        debug_output: None,
+        gpu_temp: None,
+        gpu_util: None,
+        cpu_util: None,
+    };
+
+    let v = serde_json::to_value(&req).unwrap();
+
+    assert_eq!(
+        v["cracks"],
+        json!([["hash", "plain"], "otherhash:otherplain"])
     );
 }
 

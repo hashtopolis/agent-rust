@@ -1,4 +1,4 @@
-use htp_agent::model::{BenchmarkType, ProgressReport, SendProgressResponse};
+use htp_agent::model::{BenchmarkType, Crack, ProgressReport, SendProgressResponse};
 use serde_json::json;
 
 use crate::common::{
@@ -92,18 +92,18 @@ async fn send_progress_returns_stop() {
             speed: 570000,
             state: 3,
             cracks: vec![
-                vec![
+                Crack::Fields(vec![
                     "7fde65673fd28736423f23423786f".to_string(),
                     "thisisplain".to_string(),
                     "746869736973706c61696e".to_string(),
                     "787523889".to_string(),
-                ],
-                vec![
+                ]),
+                Crack::Fields(vec![
                     "7fde65673f28987f7423f2342378f".to_string(),
                     "otherplain".to_string(),
                     "6f74686572706c61696e".to_string(),
                     "78652".to_string(),
-                ],
+                ]),
             ],
             ..Default::default()
         })

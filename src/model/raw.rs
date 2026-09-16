@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::Crack;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) enum BenchmarkType {
     #[serde(rename = "speed")]
@@ -138,7 +140,7 @@ pub(crate) enum Request {
         relative_progress: u64,
         speed: u64,
         state: u32,
-        cracks: Vec<Vec<String>>,
+        cracks: Vec<Crack>,
 
         #[serde(rename = "debugOutput", skip_serializing_if = "Option::is_none")]
         debug_output: Option<Vec<String>>,

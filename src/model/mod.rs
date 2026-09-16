@@ -8,6 +8,8 @@ pub use convert::ProtocolError;
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 #[cfg(test)]
 mod tests;
 
@@ -160,6 +162,21 @@ pub enum GetChunkResponse {
     HealthCheck,
 }
 
+/// One cracked hash on the wire. The two backends report cracks differently and
+/// the server infers the shape per element: hashcat splits its outfile into
+/// fields and sends a JSON array (`[hash, plain, hex, pos]`), while a generic
+/// cracker forwards each raw stdout line unsplit as a JSON string
+/// (`"hash:plain"`), which the server splits itself using the hashlist
+/// separator. `#[serde(untagged)]` reproduces each shape exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Crack {
+    /// hashcat: pre-split fields, serialized as a JSON array.
+    Fields(Vec<String>),
+    /// generic: one raw line, serialized as a JSON string.
+    Raw(String),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProgressReport {
     pub chunk_id: u64,
@@ -167,7 +184,7 @@ pub struct ProgressReport {
     pub relative_progress: u64,
     pub speed: u64,
     pub state: u32,
-    pub cracks: Vec<Vec<String>>,
+    pub cracks: Vec<Crack>,
     pub debug_output: Option<Vec<String>>,
     pub gpu_temp: Option<Vec<i64>>,
     pub gpu_util: Option<Vec<i64>>,
