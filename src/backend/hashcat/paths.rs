@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::backend::paths::absolute;
+
 use super::HashcatCracker;
 
 impl HashcatCracker {
@@ -35,10 +37,4 @@ impl HashcatCracker {
                 .join("hashcat.potfile"),
         )
     }
-}
-
-/// Make `path` absolute without touching the filesystem, falling back to the
-/// original on the (platform-specific) error paths.
-pub(super) fn absolute(path: PathBuf) -> PathBuf {
-    std::path::absolute(&path).unwrap_or(path)
 }
