@@ -8,7 +8,7 @@ use enum_dispatch::enum_dispatch;
 use thiserror::Error;
 
 use crate::backend::generic::GenericCracker;
-use crate::backend::hashcat::HashcatCracker;
+use crate::backend::hashcat::{AutoPipePolicy, HashcatCracker};
 use crate::model::{Chunk, CrackerId, ProgressReport, ResolvedPreprocessor, TaskAssignment};
 
 #[derive(Debug, Error)]
@@ -122,9 +122,11 @@ pub async fn build_cracker(
     cracker_id: CrackerId,
     binary_path: PathBuf,
     paths: crate::config::Paths,
+    auto_pipe: Option<AutoPipePolicy>,
 ) -> Result<AnyCracker, CrackerError> {
     let cracker = match kind {
-        CrackerKind::Hashcat => HashcatCracker::new(cracker_id, binary_path, paths)
+        // Only hashcat pipes; the generic backend ignores the policy.
+        CrackerKind::Hashcat => HashcatCracker::new(cracker_id, binary_path, paths, auto_pipe)
             .await?
             .into(),
         CrackerKind::Generic => GenericCracker::new(cracker_id, binary_path, paths).into(),

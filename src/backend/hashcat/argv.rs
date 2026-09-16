@@ -53,6 +53,7 @@ pub(super) fn path_arg(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    use crate::backend::hashcat::progress;
     use crate::config::Paths;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -75,7 +76,8 @@ mod tests {
             cracker_id: 1,
             binary_path: PathBuf::from("/opt/hashcat/hashcat"),
             paths,
-            progress_mode: super::super::progress::ProgressMode::Absolute,
+            progress_mode: progress::ProgressMode::Absolute,
+            auto_pipe: None,
         };
 
         (dir, cracker)

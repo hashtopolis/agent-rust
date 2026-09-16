@@ -10,12 +10,21 @@ use crate::process::{self, ProcessSpec};
 use crate::sysinfo::CpuSampler;
 
 use super::HashcatInvocation;
+use super::auto_pipe::{Probe, mean_util, should_repipe};
 use super::progress::ProgressMode;
 use super::status::{self, HashcatStatus};
 
 const CHANNEL_CAPACITY: usize = 256;
 const MAX_CRACKS_PER_UPDATE: usize = 1000;
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The outcome of one chunk run. `Underutilised` asks the caller to restart the
+/// same chunk as a self-pipe (see [`super::HashcatCracker::run_chunk`]); it can
+/// only arise when the run was given an armed [`Probe`].
+pub(super) enum ChunkResult {
+    Done(ChunkOutcome),
+    Underutilised,
+}
 
 /// Drive one chunk to completion: spawn the process, read back status/cracks/
 /// errors, and report them until the channel closes (process exited) or the
@@ -24,18 +33,19 @@ pub(super) async fn run<S: ProgressSink>(
     invocation: HashcatInvocation,
     chunk: Chunk,
     progress_mode: ProgressMode,
+    probe: Option<Probe>,
     sink: &S,
-) -> Result<ChunkOutcome, CrackerError> {
+) -> Result<ChunkResult, CrackerError> {
     prepare_outfile(&invocation.outfile).await?;
     prepare_zaps_dir(&invocation.zaps_dir).await?;
 
-    let (mut hashcat, mut preprocessor) =
+    let (mut hashcat, mut producer) =
         spawn_processes(&invocation).map_err(|error| CrackerError::Process(error.to_string()))?;
 
-    // Both hashcat and the preprocessor lead their own groups; a stop must take
+    // Both hashcat and the producer lead their own groups; a stop must take
     // down both.
     let hashcat_pid = hashcat.id();
-    let preprocessor_pid = preprocessor.as_ref().and_then(|child| child.id());
+    let producer_pid = producer.as_ref().and_then(|child| child.id());
 
     let stdout = hashcat
         .stdout
@@ -47,10 +57,10 @@ pub(super) async fn run<S: ProgressSink>(
         .take()
         .ok_or_else(|| CrackerError::Process("hashcat stderr not captured".into()))?;
 
-    // The preprocessor's stderr is logged, not reported as a crack-run error;
+    // The producer's stderr is logged, not reported as a crack-run error;
     // hashcat's own stderr is what the server acts on.
-    if let Some(preprocessor_stderr) = preprocessor.as_mut().and_then(|child| child.stderr.take()) {
-        process::spawn_stderr_logger(preprocessor_stderr);
+    if let Some(producer_stderr) = producer.as_mut().and_then(|child| child.stderr.take()) {
+        process::spawn_stderr_logger(producer_stderr);
     }
 
     let (tx, mut rx) = mpsc::channel::<Event>(CHANNEL_CAPACITY);
@@ -73,8 +83,8 @@ pub(super) async fn run<S: ProgressSink>(
     let waiter = tokio::spawn(async move {
         let _ = hashcat.wait().await;
 
-        if let Some(mut preprocessor) = preprocessor {
-            let _ = preprocessor.wait().await;
+        if let Some(mut producer) = producer {
+            let _ = producer.wait().await;
         }
 
         let _ = finish_tx.send(true);
@@ -88,18 +98,28 @@ pub(super) async fn run<S: ProgressSink>(
     );
     keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    let mut state = ChunkRun::new(chunk, invocation.preprocessor.is_some(), progress_mode);
+    let mut state = ChunkRun::new(chunk, invocation.producer.is_some(), progress_mode, probe);
 
     loop {
         tokio::select! {
             event = rx.recv() => {
                 let Some(event) = event else { break; };
 
-                if let Flow::Stop = state.handle(event, sink, &invocation).await {
-                    process::kill_group(hashcat_pid);
-                    process::kill_group(preprocessor_pid);
-                    state.stopped = true;
-                    break;
+                match state.handle(event, sink, &invocation).await {
+                    Flow::Continue => {}
+                    Flow::Stop => {
+                        process::kill_group(hashcat_pid);
+                        process::kill_group(producer_pid);
+                        state.stopped = true;
+                        break;
+                    }
+                    // GPU starved: tear the run down and signal a self-pipe restart.
+                    Flow::Repipe => {
+                        process::kill_group(hashcat_pid);
+                        process::kill_group(producer_pid);
+                        state.repipe = true;
+                        break;
+                    }
                 }
             }
 
@@ -109,40 +129,48 @@ pub(super) async fn run<S: ProgressSink>(
         }
     }
 
+    // Flush any cracks that arrived after the last status. On a repipe this
+    // reports the direct phase's work before the restart, which the Python agent
+    // discards; finalize is a no-op after a server stop.
     state.finalize(sink, &invocation).await;
 
     let _ = waiter.await;
 
-    Ok(ChunkOutcome {
-        stopped: state.stopped,
+    Ok(if state.repipe {
+        ChunkResult::Underutilised
+    } else {
+        ChunkResult::Done(ChunkOutcome {
+            stopped: state.stopped,
+        })
     })
 }
 
-/// Spawn the run: a plain hashcat process, or a `preprocessor | hashcat`
-/// pipeline when the invocation carries a preprocessor. Returns hashcat, whose
-/// output the loop reads, plus the preprocessor to reap.
+/// Spawn the run: a plain hashcat process, or a `producer | hashcat` pipeline
+/// when the invocation carries a producer (a preprocessor or a self-piping
+/// hashcat). Returns hashcat, whose output the loop reads, plus the producer to
+/// reap.
 fn spawn_processes(
     invocation: &HashcatInvocation,
 ) -> std::io::Result<(tokio::process::Child, Option<tokio::process::Child>)> {
-    match &invocation.preprocessor {
+    match &invocation.producer {
         None => {
             let child =
                 process::spawn_grouped(&invocation.program, &invocation.args, &invocation.cwd)?;
 
             Ok((child, None))
         }
-        Some(preprocessor) => {
+        Some(producer) => {
             let pipeline = process::spawn_pipeline(
                 ProcessSpec {
-                    program: &preprocessor.program,
-                    args: &preprocessor.args,
+                    program: &producer.program,
+                    args: &producer.args,
                 },
                 ProcessSpec {
                     program: &invocation.program,
                     args: &invocation.args,
                 },
                 &invocation.cwd,
-                preprocessor.window,
+                producer.window,
             )?;
 
             Ok((pipeline.consumer, Some(pipeline.producer)))
@@ -160,10 +188,12 @@ enum Event {
     Crack(String),
 }
 
-/// Whether the run loop should keep going or tear the process down.
+/// Whether the run loop should keep going, tear the process down and stop, or
+/// tear it down and restart the chunk as a self-pipe.
 enum Flow {
     Continue,
     Stop,
+    Repipe,
 }
 
 /// The progress figures carried by the most recent status, reused to flush any
@@ -187,12 +217,15 @@ struct ChunkRun {
     last_progress: Option<Progress>,
     first_status: bool,
     stopped: bool,
+    repipe: bool,
+    status_count: u32,
+    probe: Option<Probe>,
     progress: ProgressMode,
     cpu: CpuSampler,
 }
 
 impl ChunkRun {
-    fn new(chunk: Chunk, piped: bool, progress: ProgressMode) -> Self {
+    fn new(chunk: Chunk, piped: bool, progress: ProgressMode, probe: Option<Probe>) -> Self {
         Self {
             chunk,
             piped,
@@ -200,6 +233,9 @@ impl ChunkRun {
             last_progress: None,
             first_status: false,
             stopped: false,
+            repipe: false,
+            status_count: 0,
+            probe,
             progress,
             cpu: CpuSampler::new(),
         }
@@ -238,11 +274,28 @@ impl ChunkRun {
         invocation: &HashcatInvocation,
     ) -> Flow {
         self.first_status = true;
+        self.status_count += 1;
 
         let progress = self.progress_from(&status);
         self.last_progress = Some(progress.clone());
 
-        self.flush(sink, invocation, &progress).await
+        // Report progress and cracks first, so a repipe never drops them.
+        if let Flow::Stop = self.flush(sink, invocation, &progress).await {
+            return Flow::Stop;
+        }
+
+        // Then decide whether the GPU is starved enough to switch to a self-pipe.
+        if let Some(probe) = &self.probe {
+            if should_repipe(
+                self.status_count,
+                mean_util(status.utils()),
+                probe.threshold,
+            ) {
+                return Flow::Repipe;
+            }
+        }
+
+        Flow::Continue
     }
 
     fn progress_from(&mut self, status: &HashcatStatus) -> Progress {
@@ -457,6 +510,7 @@ mod tests {
             },
             false,
             ProgressMode::Absolute,
+            None,
         );
 
         let progress = run.progress_from(&status);

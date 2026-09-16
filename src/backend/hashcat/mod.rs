@@ -1,10 +1,11 @@
 mod argv;
+mod auto_pipe;
 mod benchmark;
 mod chunk;
 mod healthcheck;
 mod keyspace;
 mod paths;
-mod preprocessor;
+mod producer;
 mod progress;
 pub mod status;
 
@@ -14,8 +15,9 @@ use crate::config::Paths;
 use crate::cracker::{ChunkOutcome, Cracker, CrackerError, HealthCheckOutcome, ProgressSink};
 use crate::model::{Chunk, CrackerId, ResolvedPreprocessor, TaskAssignment};
 
-use crate::backend::args::Args;
-use argv::path_arg;
+use chunk::ChunkResult;
+
+pub use auto_pipe::AutoPipePolicy;
 
 /// Modern hashcat (v6+) crack-record format `hash:plain:hex_plain:crack_pos`.
 /// The old `15` format for pre-6.0 binaries is not supported.
@@ -26,6 +28,7 @@ pub struct HashcatCracker {
     binary_path: PathBuf,
     paths: Paths,
     progress_mode: progress::ProgressMode,
+    auto_pipe: Option<AutoPipePolicy>,
 }
 
 impl HashcatCracker {
@@ -34,6 +37,7 @@ impl HashcatCracker {
         cracker_id: CrackerId,
         binary_path: PathBuf,
         paths: Paths,
+        auto_pipe: Option<AutoPipePolicy>,
     ) -> Result<Self, CrackerError> {
         let progress_mode = progress::ProgressMode::detect(&binary_path).await?;
 
@@ -42,92 +46,40 @@ impl HashcatCracker {
             binary_path,
             paths,
             progress_mode,
-        })
-    }
-
-    /// Assemble the argv and paths for a plain (non-preprocessor) chunk run. The
-    /// preprocessor pipe variant lives in [`preprocessor`].
-    fn build_command(
-        &self,
-        task: &TaskAssignment,
-        chunk: &Chunk,
-    ) -> Result<HashcatInvocation, CrackerError> {
-        let hashlist = self.hashlist_file(task.hashlist_id);
-        let outfile = self.hashlist_outfile(task.hashlist_id);
-        let zaps_dir = self.zaps_dir(task.hashlist_id);
-
-        let builder = Args::new()
-            .arg("--machine-readable")
-            .arg("--quiet")
-            .arg("--status")
-            .arg("--restore-disable")
-            .arg("--session=hashtopolis")
-            .arg(format!("--status-timer={}", task.status_timer))
-            .arg(format!("--outfile-check-timer={}", task.status_timer))
-            .arg(format!("--outfile-check-dir={}", path_arg(&zaps_dir)))
-            .arg("-o")
-            .arg(path_arg(&outfile))
-            .arg(format!("--outfile-format={OUTFILE_FORMAT}"))
-            .arg("-p")
-            .arg("\t")
-            .arg("-s")
-            .arg(chunk.skip.to_string())
-            .arg("-l")
-            .arg(chunk.length.to_string());
-
-        // With brain, hashcat coordinates work centrally and consults a potfile
-        // instead of removing cracked hashes from the list. We point it at the
-        // exact file the provisioner filled via getFound, rather than trusting
-        // hashcat's version- and platform-dependent default potfile location.
-        // Without brain we disable the potfile and let hashcat strip cracked
-        // hashes from the list itself.
-        let builder = match &task.brain {
-            Some(brain) => builder
-                .arg("--brain-client")
-                .arg(format!("--brain-host={}", brain.host))
-                .arg(format!("--brain-port={}", brain.port))
-                .arg(format!("--brain-password={}", brain.pass))
-                .arg(format!("--brain-client-features={}", brain.features))
-                .arg(format!("--potfile-path={}", path_arg(&self.potfile()))),
-            None => builder
-                .arg("--potfile-disable")
-                .arg("--remove")
-                .arg(format!("--remove-timer={}", task.status_timer)),
-        };
-
-        let args = builder
-            .args(self.resolve_attack(&task.attack_command, &task.hashlist_alias, Some(&hashlist)))
-            .args(argv::split_parameters(&task.cmd_parameters))
-            .build();
-
-        Ok(HashcatInvocation {
-            program: self.program().to_path_buf(),
-            args,
-            cwd: self.cwd().to_path_buf(),
-            outfile,
-            zaps_dir,
-            preprocessor: None,
+            auto_pipe,
         })
     }
 }
 
+/// Which candidate source feeds a chunk run. Chosen inside [`HashcatCracker::run_chunk`]
+/// and passed to [`HashcatCracker::build_invocation`]; the run loop never sees it.
+enum ChunkSource<'a> {
+    /// hashcat seeks the wordlist or mask itself, bounded by `-s`/`-l`.
+    Direct,
+    /// A preprocessor binary emits candidates on stdout that hashcat consumes.
+    Preprocessor(&'a ResolvedPreprocessor),
+    /// hashcat feeds itself: `hashcat --stdout ... | hashcat ...`.
+    SelfPipe,
+}
+
 /// Everything a chunk run needs from command assembly: what to spawn, where, and
 /// the two files the run reads back from and writes zaps into. `program`/`args`
-/// describe hashcat itself; `preprocessor`, when set, is a stage whose stdout
-/// feeds hashcat's stdin.
+/// describe hashcat itself; `producer`, when set, is a stage whose stdout feeds
+/// hashcat's stdin.
 struct HashcatInvocation {
     program: PathBuf,
     args: Vec<String>,
     cwd: PathBuf,
     outfile: PathBuf,
     zaps_dir: PathBuf,
-    preprocessor: Option<PreprocessorSpec>,
+    producer: Option<ProducerStage>,
 }
 
-/// The preprocessor half of a piped run. `window` is set only when the
-/// preprocessor lacks native skip/limit flags, in which case the `(skip, length)`
-/// range is applied to its output stream in-process.
-struct PreprocessorSpec {
+/// The producer half of a piped run: a preprocessor binary or a self-piping
+/// hashcat. `window` is set only when the producer lacks native skip/limit
+/// flags, in which case the `(skip, length)` range is applied to its output
+/// stream in-process.
+struct ProducerStage {
     program: PathBuf,
     args: Vec<String>,
     window: Option<(u64, u64)>,
@@ -158,12 +110,44 @@ impl Cracker for HashcatCracker {
         preprocessor: Option<&ResolvedPreprocessor>,
         sink: &S,
     ) -> Result<ChunkOutcome, CrackerError> {
-        let invocation = match preprocessor {
-            Some(pp) => self.build_preprocessor_command(task, &chunk, pp)?,
-            None => self.build_command(task, &chunk)?,
+        let source = initial_source(task, preprocessor);
+
+        // Arm the slow-hash auto-pipe only for a direct run, when the policy is
+        // set and the task qualifies. A run already piped for any other reason
+        // must never switch again.
+        let probe = if let Some(policy) = self.auto_pipe
+            && matches!(source, ChunkSource::Direct)
+            && auto_pipe::preconditions_met(task)
+        {
+            Some(auto_pipe::Probe {
+                threshold: policy.util_threshold,
+            })
+        } else {
+            None
         };
 
-        chunk::run(invocation, chunk, self.progress_mode, sink).await
+        let invocation = self.build_invocation(task, &chunk, source)?;
+
+        // The first attempt, armed if the task qualified above.
+        if let ChunkResult::Done(outcome) =
+            chunk::run(invocation, chunk, self.progress_mode, probe, sink).await?
+        {
+            return Ok(outcome);
+        }
+
+        // The GPU was starved: restart the same chunk as a self-pipe, this time
+        // unarmed so it cannot loop.
+        tracing::info!("gpu underutilised; restarting chunk as a self-pipe");
+
+        let invocation = self.build_invocation(task, &chunk, ChunkSource::SelfPipe)?;
+
+        let ChunkResult::Done(outcome) =
+            chunk::run(invocation, chunk, self.progress_mode, None, sink).await?
+        else {
+            unreachable!("a self-pipe run is never armed for auto-pipe")
+        };
+
+        Ok(outcome)
     }
 
     async fn run_health_check(
@@ -180,6 +164,19 @@ impl Cracker for HashcatCracker {
     }
 }
 
+/// Pick the candidate source before any live telemetry: a preprocessor if the
+/// task has one, else a self-pipe when `enforce_pipe` is set, else direct.
+fn initial_source<'a>(
+    task: &TaskAssignment,
+    preprocessor: Option<&'a ResolvedPreprocessor>,
+) -> ChunkSource<'a> {
+    match preprocessor {
+        Some(pp) => ChunkSource::Preprocessor(pp),
+        None if task.enforce_pipe => ChunkSource::SelfPipe,
+        None => ChunkSource::Direct,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -187,8 +184,10 @@ mod tests {
     use crate::config::Paths;
     use crate::model::{BenchmarkType, BrainConfig, Chunk, TaskAssignment};
 
+    use super::argv::path_arg;
+    use super::auto_pipe::preconditions_met;
     use super::progress::ProgressMode;
-    use super::{HashcatCracker, path_arg};
+    use super::{ChunkSource, HashcatCracker, initial_source};
 
     const CRACKER_ID: u64 = 4;
 
@@ -198,6 +197,7 @@ mod tests {
             binary_path: PathBuf::from("/opt/crackers/4/hashcat.bin"),
             paths: Paths::default(),
             progress_mode: ProgressMode::Absolute,
+            auto_pipe: None,
         }
     }
 
@@ -252,7 +252,9 @@ mod tests {
     fn a_plain_chunk_run_emits_the_baseline_flags() {
         let cracker = cracker();
 
-        let invocation = cracker.build_command(&task(None), &CHUNK).unwrap();
+        let invocation = cracker
+            .build_invocation(&task(None), &CHUNK, ChunkSource::Direct)
+            .unwrap();
         let args = &invocation.args;
 
         // Static flags every chunk run carries.
@@ -298,7 +300,10 @@ mod tests {
         task.attack_command = "#HL# -a 3 ?a?a?a".into();
         task.cmd_parameters = "-O -w 4".into();
 
-        let args = cracker.build_command(&task, &CHUNK).unwrap().args;
+        let args = cracker
+            .build_invocation(&task, &CHUNK, ChunkSource::Direct)
+            .unwrap()
+            .args;
 
         // The alias is replaced by the hashlist path and the attack tokens follow.
         assert!(args.iter().any(|arg| Path::new(arg).ends_with("7")));
@@ -317,7 +322,9 @@ mod tests {
     fn a_brain_run_pins_the_potfile_path_and_leaves_it_enabled() {
         let cracker = cracker();
 
-        let invocation = cracker.build_command(&task(Some(brain())), &CHUNK).unwrap();
+        let invocation = cracker
+            .build_invocation(&task(Some(brain())), &CHUNK, ChunkSource::Direct)
+            .unwrap();
 
         let args = &invocation.args;
 
@@ -346,7 +353,10 @@ mod tests {
     fn a_non_brain_run_disables_the_potfile_and_removes_cracked_hashes() {
         let cracker = cracker();
 
-        let args = cracker.build_command(&task(None), &CHUNK).unwrap().args;
+        let args = cracker
+            .build_invocation(&task(None), &CHUNK, ChunkSource::Direct)
+            .unwrap()
+            .args;
 
         // The non-brain branch strips cracked hashes from the list itself.
         assert!(args.iter().any(|arg| arg == "--potfile-disable"));
@@ -359,5 +369,83 @@ mod tests {
             !args.iter().any(|arg| arg.starts_with("--potfile-path=")),
             "a non-brain run has no downloaded potfile to point at"
         );
+    }
+
+    fn qualifying() -> TaskAssignment {
+        let mut task = task(None);
+        task.slow_hash = true;
+        task.files = vec!["rockyou.txt".into()];
+        task
+    }
+
+    #[test]
+    fn initial_source_prefers_preprocessor_then_enforced_pipe_then_direct() {
+        use crate::model::ResolvedPreprocessor;
+
+        let pp = ResolvedPreprocessor {
+            command: "--pw-min=1".into(),
+            binary_path: PathBuf::from("/pp/1/pp.bin"),
+            keyspace_command: None,
+            skip_command: None,
+            limit_command: None,
+        };
+
+        // A preprocessor wins even when enforce_pipe is also set.
+        {
+            let mut task = task(None);
+            task.enforce_pipe = true;
+            assert!(matches!(
+                initial_source(&task, Some(&pp)),
+                ChunkSource::Preprocessor(_)
+            ));
+        }
+
+        // No preprocessor and enforce_pipe set: a self-pipe.
+        {
+            let mut task = task(None);
+            task.enforce_pipe = true;
+            assert!(matches!(initial_source(&task, None), ChunkSource::SelfPipe));
+        }
+
+        // Nothing set: direct.
+        assert!(matches!(
+            initial_source(&task(None), None),
+            ChunkSource::Direct
+        ));
+    }
+
+    #[test]
+    fn arming_requires_slow_hash_files_no_brain_and_no_slow_candidates() {
+        assert!(preconditions_met(&qualifying()));
+
+        let mut task = qualifying();
+        task.slow_hash = false;
+        assert!(!preconditions_met(&task));
+
+        let mut task = qualifying();
+        task.files.clear();
+        assert!(!preconditions_met(&task));
+
+        let mut task = qualifying();
+        task.brain = Some(brain());
+        assert!(!preconditions_met(&task));
+
+        let mut task = qualifying();
+        task.attack_command = "#HL# -a 0 -S rockyou.txt".into();
+        assert!(!preconditions_met(&task));
+    }
+
+    #[test]
+    fn a_standalone_slow_candidate_flag_disarms_but_a_prefix_does_not() {
+        // `-S` in the extra parameters disarms an otherwise-qualifying task.
+        let mut task = qualifying();
+        task.cmd_parameters = "-w 4 -S".into();
+        assert!(!preconditions_met(&task));
+
+        // `-S` as a prefix of a longer token in either field does not.
+        let mut task = qualifying();
+        task.attack_command = "#HL# -a 0 -Slow.txt".into();
+        task.cmd_parameters = "-Sx".into();
+        assert!(preconditions_met(&task));
     }
 }
