@@ -458,10 +458,26 @@ mod tests {
         zip_path
     }
 
+    /// A version one patch above the running agent, so a bundle labelled with it
+    /// is treated as an upgrade rather than the current build. Deriving it from
+    /// `agent_version()` keeps these fixtures correct across version bumps.
+    fn newer_version() -> String {
+        let mut parts: Vec<u32> = agent_version()
+            .split('.')
+            .map(|p| p.parse().expect("agent version is numeric semver"))
+            .collect();
+        *parts.last_mut().expect("agent version has components") += 1;
+        parts
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
     #[test]
     fn stages_the_matching_binary_from_a_nested_bundle() {
         let tmp = TempDir::new().unwrap();
-        let zip = build_bundle(tmp.path(), "0.2.0");
+        let zip = build_bundle(tmp.path(), &newer_version());
         let dest = tmp.path().join("staged");
 
         let staged = stage_from_zip(&zip, &dest, "x86_64-pc-windows-gnu").unwrap();
@@ -469,7 +485,7 @@ mod tests {
         match staged {
             StageResult::ReadyForSwap { path, version } => {
                 assert_eq!(path, dest);
-                assert_eq!(version, "0.2.0");
+                assert_eq!(version, newer_version());
                 assert_eq!(fs::read(&dest).unwrap(), b"windows-binary");
             }
             StageResult::AlreadyCurrent => panic!("expected a staged binary"),
@@ -494,7 +510,7 @@ mod tests {
     #[test]
     fn staging_fails_without_a_binary_for_the_target() {
         let tmp = TempDir::new().unwrap();
-        let zip = build_bundle(tmp.path(), "0.2.0");
+        let zip = build_bundle(tmp.path(), &newer_version());
         let dest = tmp.path().join("staged");
 
         let error = stage_from_zip(&zip, &dest, "aarch64-apple-darwin").unwrap_err();
@@ -559,7 +575,7 @@ mod tests {
     #[test]
     fn staging_uses_separate_private_directories() {
         let tmp = TempDir::new().unwrap();
-        let zip = build_bundle(tmp.path(), "0.2.0");
+        let zip = build_bundle(tmp.path(), &newer_version());
 
         let first = prepare_from_zip(&zip, tmp.path(), "x86_64-unknown-linux-musl")
             .unwrap()
@@ -591,7 +607,7 @@ mod tests {
     #[test]
     fn extraction_does_not_follow_an_existing_symlink() {
         let tmp = TempDir::new().unwrap();
-        let zip = build_bundle(tmp.path(), "0.2.0");
+        let zip = build_bundle(tmp.path(), &newer_version());
         let victim = tmp.path().join("victim");
         fs::write(&victim, b"original").unwrap();
 
@@ -727,7 +743,7 @@ mod tests {
             let exe = tmp.path().join("agent");
             fs::write(&exe, b"previous executable").unwrap();
 
-            let zip = build_bundle(tmp.path(), "0.2.0");
+            let zip = build_bundle(tmp.path(), &newer_version());
             let prepared = prepare_from_zip(&zip, tmp.path(), "x86_64-unknown-linux-musl")
                 .unwrap()
                 .unwrap();
@@ -761,7 +777,7 @@ mod tests {
         let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
         let options = zip::write::SimpleFileOptions::default();
         let manifest = serde_json::json!({
-            "version": "0.2.0",
+            "version": newer_version(),
             "binaries": [{"path": "htp-agent", "triples": [agent_target()]}],
         });
         zip.start_file("manifest.json", options).unwrap();
@@ -845,7 +861,13 @@ mod tests {
     #[test]
     fn updates_and_failed_restarts_in_disposable_processes() {
         let original = std::env::current_exe().unwrap();
-        let new_binary = b"#!/bin/sh\nif [ \"$1\" = --version ]; then\n  echo 'htp-agent 0.2.0'\nelse\n  printf '%s\\n' \"$@\" > \"$HTP_UPDATE_MARKER\"\nfi\n";
+        // The staged binary must report the bundle's version for the probe to
+        // pass, so echo the same upgrade version the manifest advertises.
+        let new_binary = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then\n  echo 'htp-agent {}'\nelse\n  printf '%s\\n' \"$@\" > \"$HTP_UPDATE_MARKER\"\nfi\n",
+            newer_version()
+        );
+        let new_binary = new_binary.as_bytes();
 
         for scenario in ["success", "invalid", "wrong-version", "restart-error"] {
             let tmp = TempDir::new().unwrap();

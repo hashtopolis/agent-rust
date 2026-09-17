@@ -490,11 +490,17 @@ async fn remove_file(path: &Path) {
 }
 
 /// A bare file name with no separator or parent reference. This is what keeps a
-/// server-supplied name from resolving outside the files directory. Both
-/// separators and colons are rejected regardless of platform, including Windows
-/// drive-relative paths (`C:file`) and alternate data streams (`file:stream`).
+/// server-supplied name from resolving outside the files directory. Path
+/// separators are rejected on every platform. The colon is rejected only on
+/// Windows, where it introduces drive-relative paths (`C:file`) and alternate
+/// data streams (`file:stream`); on Unix it is an ordinary filename character,
+/// as in the ISO-8601 timestamps the server emits (`test-...T11:38:16.txt`).
 fn is_plain_filename(name: &str) -> bool {
-    if name.contains(['/', '\\', ':']) {
+    if name.contains(['/', '\\']) {
+        return false;
+    }
+
+    if cfg!(windows) && name.contains(':') {
         return false;
     }
 
@@ -564,6 +570,23 @@ mod tests {
         assert!(!is_plain_filename("/etc/passwd"));
         assert!(!is_plain_filename(".."));
         assert!(!is_plain_filename("."));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn colon_names_are_accepted_on_unix() {
+        // The server names files after ISO-8601 timestamps, whose time part
+        // carries colons. On Unix these are ordinary, in-directory filenames.
+        assert!(is_plain_filename("test-2026-09-07T11:38:16.302574.txt"));
+        assert!(is_plain_filename("wordlist.txt:stream"));
+        assert!(is_plain_filename("C:state.json"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn colon_names_are_rejected_on_windows() {
+        // On Windows a colon introduces a drive-relative path or an alternate
+        // data stream, either of which can resolve outside the files directory.
         assert!(!is_plain_filename("C:state.json"));
         assert!(!is_plain_filename("C:"));
         assert!(!is_plain_filename("wordlist.txt:stream"));
@@ -661,15 +684,14 @@ mod tests {
         let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, PanicDownloader);
         let client = Client::new(PanicTransport);
 
-        for name in [
-            "../evil",
-            "/etc/cron.d/evil",
-            "sub/evil",
-            "..",
-            "C:state.json",
-            "C:",
-            "wordlist.txt:stream",
-        ] {
+        let mut unsafe_names = vec!["../evil", "/etc/cron.d/evil", "sub/evil", ".."];
+        // Colon names escape only on Windows (drive-relative paths, alternate
+        // data streams); on Unix they are ordinary in-directory filenames.
+        if cfg!(windows) {
+            unsafe_names.extend(["C:state.json", "C:", "wordlist.txt:stream"]);
+        }
+
+        for name in unsafe_names {
             let error = provisioner
                 .ensure_files(&client, &[name.to_owned()], 1)
                 .await
