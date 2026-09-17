@@ -2,6 +2,7 @@
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use thiserror::Error;
 
@@ -94,22 +95,92 @@ pub struct DiskProvisioner<D: Downloader> {
     paths: Paths,
     hashcat_fallback: Option<PathBuf>,
     auto_pipe: Option<AutoPipePolicy>,
+    rsync_mount: Option<PathBuf>,
+    rsync_available: AtomicBool,
     downloader: D,
 }
 
-impl<D: Downloader> DiskProvisioner<D> {
-    pub fn new(
-        paths: Paths,
-        hashcat_fallback: Option<PathBuf>,
-        auto_pipe: Option<AutoPipePolicy>,
-        downloader: D,
-    ) -> Self {
-        Self {
-            paths,
-            hashcat_fallback,
-            auto_pipe,
-            downloader,
+pub struct DiskProvisionerBuilder<D: Downloader> {
+    paths: Paths,
+    downloader: D,
+    hashcat_fallback: Option<PathBuf>,
+    auto_pipe: Option<AutoPipePolicy>,
+    rsync_mount: Option<PathBuf>,
+}
+
+impl<D: Downloader> DiskProvisionerBuilder<D> {
+    pub fn hashcat_fallback(mut self, value: Option<PathBuf>) -> Self {
+        self.hashcat_fallback = value;
+        self
+    }
+
+    pub fn auto_pipe(mut self, value: Option<AutoPipePolicy>) -> Self {
+        self.auto_pipe = value;
+        self
+    }
+
+    pub fn rsync_mount(mut self, value: Option<PathBuf>) -> Self {
+        self.rsync_mount = value;
+        self
+    }
+
+    pub fn build(self) -> DiskProvisioner<D> {
+        DiskProvisioner {
+            paths: self.paths,
+            hashcat_fallback: self.hashcat_fallback,
+            auto_pipe: self.auto_pipe,
+            rsync_mount: self.rsync_mount,
+            rsync_available: AtomicBool::new(true),
+            downloader: self.downloader,
         }
+    }
+}
+
+impl<D: Downloader> DiskProvisioner<D> {
+    pub fn builder(paths: Paths, downloader: D) -> DiskProvisionerBuilder<D> {
+        DiskProvisionerBuilder {
+            paths,
+            downloader,
+            hashcat_fallback: None,
+            auto_pipe: None,
+            rsync_mount: None,
+        }
+    }
+
+    async fn fetch_task_file(
+        &self,
+        url: &str,
+        filesize: u64,
+        file: &str,
+        dest: &Path,
+    ) -> Result<(), ProvisionError> {
+        if let Some(mount) = &self.rsync_mount {
+            let rsync_available = self.rsync_available.load(Ordering::Relaxed);
+
+            if rsync_available {
+                match rsync_pull(mount, file, dest).await {
+                    RsyncOutcome::Fetched => return Ok(()),
+                    RsyncOutcome::Failed => {
+                        tracing::warn!(file = %file, "rsync failed on configured mount, using http");
+                    }
+                    RsyncOutcome::Unavailable => {
+                        // Only warn first time we check
+                        let was_available = self.rsync_available.swap(false, Ordering::Relaxed);
+
+                        if was_available {
+                            tracing::warn!(
+                                "rsync is configured but not on PATH; using http for task files"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::debug!(file = %file, url = %url, size = filesize, "downloading task file");
+        self.downloader.download(url, dest).await?;
+
+        Ok(())
     }
 
     /// Resolve the configured fallback to a hashcat binary. Required since
@@ -324,8 +395,8 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
                 continue;
             }
 
-            tracing::debug!(file = %file, url = %info.url, size = info.filesize, "downloading task file");
-            self.downloader.download(&info.url, &dest).await?;
+            self.fetch_task_file(&info.url, info.filesize, file, &dest)
+                .await?;
 
             let actual = file_size(&dest).await;
 
@@ -488,6 +559,33 @@ async fn make_executable(path: &Path) -> Result<(), ProvisionError> {
     }
 
     Ok(())
+}
+
+enum RsyncOutcome {
+    Fetched,
+    Unavailable,
+    Failed,
+}
+
+/// Copy `filename` from the mount into `dest` with the system rsync. Explicit
+/// argv (no shell) keeps names with spaces or colons safe. `--archive` carries
+/// permissions, `--partial` keeps a half-copied file so the next loop resumes.
+async fn rsync_pull(mount: &Path, filename: &str, dest: &Path) -> RsyncOutcome {
+    let source = mount.join(filename);
+    let status = tokio::process::Command::new("rsync")
+        .arg("--archive")
+        .arg("--partial")
+        .arg(&source)
+        .arg(dest)
+        .status()
+        .await;
+
+    match status {
+        Ok(s) if s.success() => RsyncOutcome::Fetched,
+        Ok(_) => RsyncOutcome::Failed,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => RsyncOutcome::Unavailable,
+        Err(_) => RsyncOutcome::Failed,
+    }
 }
 
 async fn file_has_size(path: &Path, expected: u64) -> bool {
@@ -705,7 +803,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_files_rejects_a_name_that_escapes_the_files_directory() {
         let tmp = TempDir::new().unwrap();
-        let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, None, PanicDownloader);
+        let provisioner = DiskProvisioner::builder(paths_in(tmp.path()), PanicDownloader).build();
         let client = Client::new(PanicTransport);
 
         let mut unsafe_names = vec!["../evil", "/etc/cron.d/evil", "sub/evil", ".."];
@@ -729,6 +827,76 @@ mod tests {
 
         // Nothing should have been written to the files directory.
         assert!(!tmp.path().join("files").join("evil").exists());
+    }
+
+    mod ensure_files_rsync {
+        use super::super::{DiskProvisioner, Provisioner};
+        use super::{PanicDownloader, paths_in};
+
+        use crate::client::Client;
+        use crate::transport::{Transport, TransportError};
+
+        use serde_json::{Value, json};
+        use tempfile::TempDir;
+
+        // Answers getFile with a fixed size so the size verify that runs after
+        // the fetch has an expectation to check the rsync'd file against.
+        struct FileTransport {
+            filesize: u64,
+        }
+
+        impl Transport for FileTransport {
+            async fn post_json(&self, _body: &Value) -> Result<Value, TransportError> {
+                Ok(json!({
+                    "response": "SUCCESS",
+                    "filename": "rockyou.txt",
+                    "extension": "txt",
+                    "url": "http://unused.invalid/rockyou.txt",
+                    "filesize": self.filesize,
+                }))
+            }
+        }
+
+        // Gated on HTP_RSYNC_TEST: the flag is a promise that rsync is on PATH,
+        // so any fall-through to HTTP (which would hit PanicDownloader) is a real
+        // failure rather than a host without the binary.
+        #[tokio::test]
+        async fn a_task_file_is_pulled_from_the_mount_without_http() {
+            if std::env::var_os("HTP_RSYNC_TEST").is_none() {
+                return;
+            }
+
+            let root = TempDir::new().unwrap();
+            let mount = TempDir::new().unwrap();
+
+            let paths = paths_in(root.path());
+            tokio::fs::create_dir_all(&paths.files).await.unwrap();
+
+            let contents = b"a-short-wordlist\n";
+            tokio::fs::write(mount.path().join("rockyou.txt"), contents)
+                .await
+                .unwrap();
+
+            let provisioner = DiskProvisioner::builder(paths.clone(), PanicDownloader)
+                .rsync_mount(Some(mount.path().to_path_buf()))
+                .build();
+            let client = Client::new(FileTransport {
+                filesize: contents.len() as u64,
+            });
+
+            provisioner
+                .ensure_files(&client, &["rockyou.txt".to_owned()], 1)
+                .await
+                .expect("rsync should place the file and pass the size verify");
+
+            let landed = paths.files.join("rockyou.txt");
+            assert!(landed.exists(), "task file should be present after rsync");
+            assert_eq!(
+                tokio::fs::read(&landed).await.unwrap(),
+                contents,
+                "rsync'd contents should match the mount source"
+            );
+        }
     }
 
     mod ensure_found {
@@ -804,7 +972,7 @@ mod tests {
             let downloader = RecordingDownloader {
                 recorded: recorded.clone(),
             };
-            let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, None, downloader);
+            let provisioner = DiskProvisioner::builder(paths_in(tmp.path()), downloader).build();
             let client = Client::new(FoundTransport {
                 url: "hashlists/leftover/7".to_owned(),
             });
@@ -843,7 +1011,7 @@ mod tests {
             let tmp = TempDir::new().unwrap();
 
             let provisioner =
-                DiskProvisioner::new(paths_in(tmp.path()), None, None, PanicDownloader);
+                DiskProvisioner::builder(paths_in(tmp.path()), PanicDownloader).build();
             let client = Client::new(RejectingTransport);
 
             let error = provisioner
@@ -869,7 +1037,7 @@ mod tests {
             let downloader = RecordingDownloader {
                 recorded: recorded.clone(),
             };
-            let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, None, downloader);
+            let provisioner = DiskProvisioner::builder(paths_in(tmp.path()), downloader).build();
             let client = Client::new(FoundTransport {
                 url: "hashlists/leftover/7".to_owned(),
             });

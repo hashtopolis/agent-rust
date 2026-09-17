@@ -46,5 +46,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # Windows runners ship no rsync, so only unix hosts opt into the rsync test.
+      - name: Enable rsync test
+        if: runner.os != 'Windows'
+        run: |
+          rsync --version
+          echo "HTP_RSYNC_TEST=1" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --locked
