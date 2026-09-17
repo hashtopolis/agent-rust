@@ -64,13 +64,11 @@ async fn run(cli: Cli) -> Result<()> {
             rsync_mount,
         } = read_settings(settings);
 
-        let provisioner = DiskProvisioner::builder(settings.paths.clone(), downloader)
+        DiskProvisioner::builder(settings.paths.clone(), downloader)
             .hashcat_fallback(hashcat_path)
             .auto_pipe(auto_pipe)
             .rsync_mount(rsync_mount)
-            .build();
-
-        provisioner
+            .build()
     };
 
     let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
