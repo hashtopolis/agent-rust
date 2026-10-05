@@ -40,6 +40,36 @@ pub fn collect_devices(configured: Option<&[String]>, cpu_only: bool) -> Vec<Str
     devices
 }
 
+pub struct CpuSampler {
+    system: System,
+}
+
+impl CpuSampler {
+    pub fn new() -> Self {
+        Self {
+            system: System::new_with_specifics(
+                RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing().with_cpu_usage()),
+            ),
+        }
+    }
+
+    /// Global CPU utilisation as a percentage in `0.0..=100.0`, rounded to one
+    /// decimal to match the reference agent.
+    pub fn sample(&mut self) -> f64 {
+        self.system.refresh_cpu_usage();
+
+        let usage = self.system.global_cpu_usage() as f64;
+
+        (usage * 10.0).round() / 10.0
+    }
+}
+
+impl Default for CpuSampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn collect_cpus() -> Vec<String> {
     let system =
         System::new_with_specifics(RefreshKind::nothing().with_cpu(CpuRefreshKind::everything()));
@@ -79,4 +109,29 @@ fn gpu_name(device: PciDevice) -> Option<String> {
     let entry = PciId::from_vid_pid(device.vendor_id(), device.device_id())?;
 
     Some(format!("{} {}", entry.vendor().name(), entry.name()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CpuSampler;
+
+    #[test]
+    fn cpu_sampler_reports_a_percentage() {
+        let mut sampler = CpuSampler::new();
+
+        // First read may be near zero (no prior delta); a second read after a
+        // short wait exercises the real path. Either way the value is a valid
+        // percentage.
+        let _ = sampler.sample();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let usage = sampler.sample();
+
+        assert!(usage.is_finite());
+        assert!(
+            (0.0..=100.0).contains(&usage),
+            "usage out of range: {usage}"
+        );
+        // Rounded to one decimal place.
+        assert_eq!(usage, (usage * 10.0).round() / 10.0);
+    }
 }
