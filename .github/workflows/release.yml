@@ -25,9 +25,9 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           target: ${{ matrix.target }}
 
@@ -39,7 +39,7 @@ jobs:
       - name: Build
         run: ./scripts/bundle.sh build ${{ matrix.target }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.target }}
           path: dist/rust-agent/
@@ -53,11 +53,11 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Each artifact holds its own <target>/ folder, so merging them rebuilds
       # the staging tree that `bundle.sh package` expects.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: bin-*
           path: dist/rust-agent
@@ -66,7 +66,7 @@ jobs:
       - name: Package
         run: ./scripts/bundle.sh package
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rust-agent
           path: dist/rust-agent.zip
@@ -74,6 +74,6 @@ jobs:
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/rust-agent.zip
