@@ -84,9 +84,12 @@ impl HashcatStatus {
                     parsed.rejected = fields.get(i).and_then(|f| f.parse().ok()).unwrap_or(0);
                     i += 1;
                 }
-                // Known-but-unused single/double/list valued fields: advance past
-                // their values so the cursor stays aligned on the next key.
-                "RECHASH" | "RECSALT" => i += 2,
+                // Known-but-unused double-valued fields: advance past their two
+                // values so the cursor stays aligned on the next key. BRAIN_REJECTED
+                // (brain_rejects_attacks, brain_rejects_hashes) is emitted by every
+                // WITH_BRAIN hashcat build, right before UTIL, so skipping it is what
+                // keeps UTIL reachable.
+                "RECHASH" | "RECSALT" | "BRAIN_REJECTED" => i += 2,
                 "EXEC_RUNTIME" | "POWER" => {
                     while i < fields.len() && fields[i].parse::<f64>().is_ok() {
                         i += 1;
@@ -206,6 +209,32 @@ mod tests {
         assert_eq!(status.speed(), 100_000);
         assert_eq!(status.temps(), &[60]);
         assert_eq!(status.utils(), &[95]);
+    }
+
+    #[test]
+    fn parses_util_after_brain_rejected() {
+        // The real machine-readable line from any WITH_BRAIN hashcat build (the
+        // default): BRAIN_REJECTED sits between REJECTED and UTIL. Parsing must
+        // not stop at it, or UTIL is lost and the slow-hash auto-pipe can never
+        // read GPU utilisation.
+        let line = "STATUS\t3\tSPEED\t178\t1000\tEXEC_RUNTIME\t13.26\tCURKU\t0\t\
+                    PROGRESS\t0\t40000\tRECHASH\t0\t4\tRECSALT\t0\t4\tTEMP\t-1\t\
+                    REJECTED\t0\tBRAIN_REJECTED\t0\t0\tUTIL\t100\tPOWER\t8519";
+
+        let status = HashcatStatus::parse(line);
+
+        assert!(status.is_valid());
+        assert_eq!(status.temps(), &[-1]);
+        assert_eq!(status.utils(), &[100]);
+    }
+
+    #[test]
+    fn parses_multi_device_util_after_brain_rejected() {
+        let line = "STATUS\t3\tREJECTED\t0\tBRAIN_REJECTED\t0\t0\tUTIL\t90\t100";
+
+        let status = HashcatStatus::parse(line);
+
+        assert_eq!(status.utils(), &[90, 100]);
     }
 
     #[test]
