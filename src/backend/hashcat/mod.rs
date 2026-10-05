@@ -182,7 +182,7 @@ impl Cracker for HashcatCracker {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use crate::config::Paths;
     use crate::model::{BenchmarkType, BrainConfig, Chunk, TaskAssignment};
@@ -301,7 +301,7 @@ mod tests {
         let args = cracker.build_command(&task, &CHUNK).unwrap().args;
 
         // The alias is replaced by the hashlist path and the attack tokens follow.
-        assert!(args.iter().any(|arg| arg.ends_with("/7")));
+        assert!(args.iter().any(|arg| Path::new(arg).ends_with("7")));
         assert!(args.iter().any(|arg| arg == "?a?a?a"));
 
         // Extra parameters are split into tokens and appended.
