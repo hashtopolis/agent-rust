@@ -27,3 +27,7 @@ files/
 
 # Release bundle output (scripts/bundle.sh)
 dist/
+
+# Local cross-build bundling (zig + cargo-zigbuild)
+mise.local.toml
+scripts/bundle-all.sh

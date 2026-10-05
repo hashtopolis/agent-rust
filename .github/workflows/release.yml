@@ -7,31 +7,64 @@ on:
   workflow_dispatch:
 
 jobs:
-  bundle:
-    name: build rust-agent.zip
-    permissions:
-      # Required so action-gh-release can create/update the release.
-      contents: write
-    # macOS host: builds the apple target natively (zig's linker duplicates the
-    # IOKit framework, which macOS dyld rejects) and cross-builds the linux-musl
-    # and windows-gnu targets via cargo-zigbuild.
-    runs-on: macos-latest
+  build:
+    name: build ${{ matrix.target }}
+    # Every target builds natively on its own OS, so each one only needs the
+    # runner's own C toolchain (ring compiles C) and no cross-linker.
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-gnu
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v6
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          target: >-
-            x86_64-unknown-linux-musl,
-            aarch64-unknown-linux-musl,
-            x86_64-pc-windows-gnu,
-            aarch64-apple-darwin
+          target: ${{ matrix.target }}
 
-      # Installs zig + cargo-zigbuild as pinned in mise.toml.
-      - uses: jdx/mise-action@v2
+      # musl-gcc for ring's C sources.
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Bundle
-        run: ./scripts/bundle.sh
+      - name: Build
+        run: ./scripts/bundle.sh build ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/rust-agent/
+          if-no-files-found: error
+
+  bundle:
+    name: build rust-agent.zip
+    needs: build
+    permissions:
+      # Required so action-gh-release can create/update the release.
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Each artifact holds its own <target>/ folder, so merging them rebuilds
+      # the staging tree that `bundle.sh package` expects.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist/rust-agent
+          merge-multiple: true
+
+      - name: Package
+        run: ./scripts/bundle.sh package
 
       - uses: actions/upload-artifact@v4
         with:

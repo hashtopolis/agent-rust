@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 #
-# Cross-compile the agent for every supported platform and bundle the binaries
-# into dist/rust-agent.zip, the artifact the backend serves as the "rust" agent
-# type.
+# Build the agent per platform and bundle the binaries into
+# dist/rust-agent.zip, the artifact the backend serves as the "rust" agent type.
 #
-# Linux (musl) and Windows (gnu) are built with cargo-zigbuild (zig as the
-# cross-linker) so they need no per-target C toolchain and build from any host.
-# macOS is built natively: zig's linker duplicates the IOKit framework that
-# pci-info/sysinfo pull in, which macOS 15+ dyld rejects, so the apple target
-# must go through the system linker -- which means the bundle's macOS binary can
-# only be produced on a macOS host.
+# Every target is built natively on its own OS (no cross-compilation), so the
+# work is split into two steps that the release workflow runs on different
+# runners:
 #
-# Requires: rustup, cargo-zigbuild, zig (all provided via mise.toml).
-# Run with:  mise run bundle    (or ./scripts/bundle.sh)
+#   ./scripts/bundle.sh build <rust-target> [cargo-subcommand]
+#       build one target and stage it under dist/rust-agent/. The subcommand
+#       defaults to `build` (native host, system linker); pass e.g. `zigbuild`
+#       to cross-build instead.
+#   ./scripts/bundle.sh package
+#       write the manifest and launchers for the staged binaries and zip them
+#
+# `package` requires a staged binary for every target below, so a full bundle
+# is only produced by CI (or by collecting the binaries from each OS).
+#
+# Requires: rustup, cargo; `package` also needs jq and zip.
 
 set -euo pipefail
 
@@ -23,87 +28,116 @@ DIST_DIR="dist"
 STAGE_DIR="$DIST_DIR/rust-agent"
 ZIP_PATH="$DIST_DIR/rust-agent.zip"
 
-VERSION="$(cargo metadata --format-version 1 --no-deps \
-    | jq -r '.packages[] | select(.name=="htp-agent-rust") | .version')"
-
-# Each entry: <builder>|<rust-target>|<staged-dir>|<binary-filename>|<os>|<arch>|<equivalent-triples-csv>
-# builder: "zig" -> cargo zigbuild; "native" -> cargo build (system linker).
-# equivalent-triples lets a running agent match its own compiled-in triple even
-# when the bundle ships a compatible build (musl serving gnu hosts; windows-gnu
-# serving msvc hosts).
+# Each entry: <rust-target>|<binary-filename>|<os>|<arch>|<equivalent-triples-csv>
+# The binary is staged as <rust-target>/<binary-filename>. equivalent-triples
+# lets a running agent match its own compiled-in triple even when the bundle
+# ships a compatible build (musl serving gnu hosts; windows-gnu serving msvc
+# hosts).
 TARGETS=(
-    "zig|x86_64-unknown-linux-musl|x86_64-unknown-linux-musl|$BIN_NAME|linux|x86_64|x86_64-unknown-linux-musl,x86_64-unknown-linux-gnu"
-    "zig|aarch64-unknown-linux-musl|aarch64-unknown-linux-musl|$BIN_NAME|linux|aarch64|aarch64-unknown-linux-musl,aarch64-unknown-linux-gnu"
-    "zig|x86_64-pc-windows-gnu|x86_64-pc-windows-gnu|$BIN_NAME.exe|windows|x86_64|x86_64-pc-windows-gnu,x86_64-pc-windows-msvc"
-    "native|aarch64-apple-darwin|aarch64-apple-darwin|$BIN_NAME|macos|aarch64|aarch64-apple-darwin"
+    "x86_64-unknown-linux-musl|$BIN_NAME|linux|x86_64|x86_64-unknown-linux-musl,x86_64-unknown-linux-gnu"
+    "x86_64-pc-windows-gnu|$BIN_NAME.exe|windows|x86_64|x86_64-pc-windows-gnu,x86_64-pc-windows-msvc"
+    "aarch64-apple-darwin|$BIN_NAME|macos|aarch64|aarch64-apple-darwin"
 )
 
-echo ">> building rust-agent v$VERSION"
+die() {
+    echo "!! $*" >&2
+    exit 1
+}
 
-echo ">> ensuring rustup targets are installed"
-rustup target add \
-    x86_64-unknown-linux-musl \
-    aarch64-unknown-linux-musl \
-    x86_64-pc-windows-gnu \
-    aarch64-apple-darwin
+usage() {
+    die "usage: $0 build <rust-target> [cargo-subcommand] | package"
+}
 
-rm -rf "$STAGE_DIR"
-mkdir -p "$STAGE_DIR"
+lookup() {
+    local wanted="$1" entry
 
-manifest_targets="[]"
+    for entry in "${TARGETS[@]}"; do
+        if [[ "${entry%%|*}" == "$wanted" ]]; then
+            echo "$entry"
+            return 0
+        fi
+    done
 
-for entry in "${TARGETS[@]}"; do
-    IFS='|' read -r builder target dir binfile os arch triples <<<"$entry"
+    return 1
+}
 
-    if [[ "$builder" == "native" && "$os" == "macos" && "$(uname -s)" != "Darwin" ]]; then
-        echo "!! skipping $target: macOS binaries must be built on a macOS host" >&2
-        continue
-    fi
+build() {
+    local target="$1" cargo_cmd="${2:-build}" entry binfile src
 
-    echo ">> building $target ($builder)"
-    if [[ "$builder" == "zig" ]]; then
-        cargo zigbuild --release --locked --target "$target"
-    else
-        cargo build --release --locked --target "$target"
-    fi
+    entry="$(lookup "$target")" || die "unknown target: $target"
+    IFS='|' read -r _ binfile _ _ _ <<<"$entry"
+
+    echo ">> building $target (cargo $cargo_cmd)"
+    rustup target add "$target"
+    cargo "$cargo_cmd" --release --locked --target "$target"
 
     src="target/$target/release/$binfile"
-    if [[ ! -f "$src" ]]; then
-        echo "!! expected binary not found: $src" >&2
-        exit 1
-    fi
+    [[ -f "$src" ]] || die "expected binary not found: $src"
 
-    mkdir -p "$STAGE_DIR/$dir"
-    cp "$src" "$STAGE_DIR/$dir/$binfile"
-    chmod +x "$STAGE_DIR/$dir/$binfile"
+    mkdir -p "$STAGE_DIR/$target"
+    cp "$src" "$STAGE_DIR/$target/$binfile"
+    echo ">> staged $STAGE_DIR/$target/$binfile"
+}
 
-    triples_json="$(jq -cn --arg t "$triples" '$t | split(",")')"
-    manifest_targets="$(jq -c \
-        --arg path "$dir/$binfile" \
-        --arg os "$os" \
-        --arg arch "$arch" \
-        --argjson triples "$triples_json" \
-        '. += [{path: $path, os: $os, arch: $arch, triples: $triples}]' \
-        <<<"$manifest_targets")"
-done
+package() {
+    local version entry target binfile os arch triples staged triples_json
+    local manifest_targets="[]"
 
-jq -n \
-    --arg agent_type "rust" \
-    --arg version "$VERSION" \
-    --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --argjson binaries "$manifest_targets" \
-    '{agent_type: $agent_type, version: $version, built_at: $built_at, binaries: $binaries}' \
-    >"$STAGE_DIR/manifest.json"
+    version="$(cargo metadata --format-version 1 --no-deps \
+        | jq -r '.packages[] | select(.name=="htp-agent-rust") | .version')"
+    echo ">> packaging rust-agent v$version"
 
-# Platform-detecting launchers so a user can run the bundle without reaching into
-# a per-target subfolder.
-cp scripts/launcher/run.sh "$STAGE_DIR/run.sh"
-cp scripts/launcher/run.bat "$STAGE_DIR/run.bat"
-chmod +x "$STAGE_DIR/run.sh"
+    for entry in "${TARGETS[@]}"; do
+        IFS='|' read -r target binfile os arch triples <<<"$entry"
 
-echo ">> writing $ZIP_PATH"
-rm -f "$ZIP_PATH"
-( cd "$DIST_DIR" && zip -r -q "rust-agent.zip" "rust-agent" )
+        staged="$STAGE_DIR/$target/$binfile"
+        [[ -f "$staged" ]] || die "missing staged binary: $staged (run '$0 build $target' on its host)"
 
-echo ">> done"
-unzip -l "$ZIP_PATH"
+        # Artifact transfers between CI jobs drop the executable bit.
+        chmod +x "$staged"
+
+        triples_json="$(jq -cn --arg t "$triples" '$t | split(",")')"
+        manifest_targets="$(jq -c \
+            --arg path "$target/$binfile" \
+            --arg os "$os" \
+            --arg arch "$arch" \
+            --argjson triples "$triples_json" \
+            '. += [{path: $path, os: $os, arch: $arch, triples: $triples}]' \
+            <<<"$manifest_targets")"
+    done
+
+    jq -n \
+        --arg agent_type "rust" \
+        --arg version "$version" \
+        --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --argjson binaries "$manifest_targets" \
+        '{agent_type: $agent_type, version: $version, built_at: $built_at, binaries: $binaries}' \
+        >"$STAGE_DIR/manifest.json"
+
+    # Platform-detecting launchers so a user can run the bundle without reaching
+    # into a per-target subfolder.
+    cp scripts/launcher/run.sh "$STAGE_DIR/run.sh"
+    cp scripts/launcher/run.bat "$STAGE_DIR/run.bat"
+    chmod +x "$STAGE_DIR/run.sh"
+
+    echo ">> writing $ZIP_PATH"
+    rm -f "$ZIP_PATH"
+    ( cd "$DIST_DIR" && zip -r -q "rust-agent.zip" "rust-agent" )
+
+    echo ">> done"
+    unzip -l "$ZIP_PATH"
+}
+
+case "${1:-}" in
+    build)
+        [[ $# -eq 2 || $# -eq 3 ]] || usage
+        build "$2" "${3:-build}"
+        ;;
+    package)
+        [[ $# -eq 1 ]] || usage
+        package
+        ;;
+    *)
+        usage
+        ;;
+esac
