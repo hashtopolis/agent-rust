@@ -89,10 +89,6 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
     }
 
     pub async fn tick(&mut self, state: &mut LoopState) -> Result<Step, AgentError> {
-        if let Err(error) = self.config.reload_settings() {
-            tracing::warn!(%error, "failed to reload settings; keeping the previous ones");
-        }
-
         self.maybe_deletion_check(state).await;
 
         if state.current_task.is_none() {
