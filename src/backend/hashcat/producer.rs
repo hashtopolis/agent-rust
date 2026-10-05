@@ -202,7 +202,7 @@ impl HashcatCracker {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use crate::config::Paths;
     use crate::model::{BenchmarkType, Chunk, ResolvedPreprocessor, TaskAssignment};
@@ -330,7 +330,12 @@ mod tests {
 
         // The alias is gone; the hashlist is an explicit positional instead.
         assert!(!invocation.args.iter().any(|arg| arg == "#HL#"));
-        assert!(invocation.args.iter().any(|arg| arg.ends_with("/7")));
+        assert!(
+            invocation
+                .args
+                .iter()
+                .any(|arg| Path::new(arg).ends_with("7"))
+        );
 
         assert!(invocation.args.iter().any(|arg| arg == "--remove"));
         assert!(invocation.args.iter().any(|arg| arg == "--potfile-disable"));
@@ -381,7 +386,12 @@ mod tests {
 
         // The hashlist is an explicit positional; the alias is gone.
         assert!(!invocation.args.iter().any(|arg| arg == "#HL#"));
-        assert!(invocation.args.iter().any(|arg| arg.ends_with("/7")));
+        assert!(
+            invocation
+                .args
+                .iter()
+                .any(|arg| Path::new(arg).ends_with("7"))
+        );
 
         // The consumer reads candidates from stdin, so no attack command and no
         // chunk bounds appear on it.
