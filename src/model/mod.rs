@@ -11,6 +11,8 @@ use std::path::PathBuf;
 #[cfg(test)]
 mod tests;
 
+pub type CrackerId = u64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
     Linux,
@@ -125,7 +127,7 @@ pub struct ResolvedPreprocessor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskAssignment {
     pub task_id: u64,
-    pub cracker_id: u64,
+    pub cracker_id: CrackerId,
     pub attack_command: String,
     pub cmd_parameters: String,
     pub hashlist_id: u64,
@@ -217,7 +219,7 @@ pub struct GetFoundResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetHealthCheckResponse {
     pub attack: String,
-    pub cracker_binary_id: u64,
+    pub cracker_binary_id: CrackerId,
     pub hashes: Vec<String>,
     pub check_id: u64,
     pub hashlist_alias: String,

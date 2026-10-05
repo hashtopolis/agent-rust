@@ -8,10 +8,10 @@ use thiserror::Error;
 use crate::archive::{self, ArchiveError};
 use crate::client::{Client, ClientError};
 use crate::config::Paths;
-use crate::cracker::{AnyCracker, Cracker, CrackerKind, build_cracker};
+use crate::cracker::{AnyCracker, Cracker, CrackerError, CrackerKind, build_cracker};
 use crate::download::{DownloadError, Downloader};
 use crate::identity::{agent_type, agent_version};
-use crate::model::{CheckClientVersionResponse, Preprocessor, ResolvedPreprocessor};
+use crate::model::{CheckClientVersionResponse, CrackerId, Preprocessor, ResolvedPreprocessor};
 use crate::transport::Transport;
 
 #[derive(Debug, Error)]
@@ -22,6 +22,8 @@ pub enum ProvisionError {
     Download(#[from] DownloadError),
     #[error(transparent)]
     Archive(#[from] ArchiveError),
+    #[error(transparent)]
+    Cracker(#[from] CrackerError),
     #[error("filesystem error at {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -48,7 +50,7 @@ pub trait Provisioner<T: Transport> {
     async fn ensure_cracker(
         &self,
         client: &Client<T>,
-        cracker_id: u64,
+        cracker_id: CrackerId,
     ) -> Result<Self::Cracker, ProvisionError>;
 
     async fn ensure_preprocessor(
@@ -74,7 +76,7 @@ pub trait Provisioner<T: Transport> {
         &self,
         client: &Client<T>,
         hashlist_id: u64,
-        cracker_id: u64,
+        cracker_id: CrackerId,
     ) -> Result<(), ProvisionError>;
 
     async fn check_client_version(&self, client: &Client<T>) -> Result<(), ProvisionError>;
@@ -135,7 +137,7 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
     async fn ensure_cracker(
         &self,
         client: &Client<T>,
-        cracker_id: u64,
+        cracker_id: CrackerId,
     ) -> Result<AnyCracker, ProvisionError> {
         let info = client.download_cracker(cracker_id).await?;
 
@@ -167,12 +169,9 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
             CrackerKind::Generic
         };
 
-        Ok(build_cracker(
-            kind,
-            cracker_id,
-            binary_path,
-            self.paths.clone(),
-        ))
+        let cracker = build_cracker(kind, cracker_id, binary_path, self.paths.clone()).await?;
+
+        Ok(cracker)
     }
 
     /// Downloads and extracts the preprocessor on first use, then hands back the
@@ -290,7 +289,7 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
         &self,
         _client: &Client<T>,
         _hashlist_id: u64,
-        _cracker_id: u64,
+        _cracker_id: CrackerId,
     ) -> Result<(), ProvisionError> {
         todo!("Not yet implemented")
     }

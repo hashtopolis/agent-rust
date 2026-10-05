@@ -3,11 +3,11 @@ pub mod status;
 use std::path::PathBuf;
 
 use crate::cracker::{ChunkOutcome, Cracker, CrackerError, HealthCheckOutcome, ProgressSink};
-use crate::model::{Chunk, ResolvedPreprocessor, TaskAssignment};
+use crate::model::{Chunk, CrackerId, ResolvedPreprocessor, TaskAssignment};
 
 pub struct GenericCracker {
     #[allow(dead_code)]
-    cracker_id: u64,
+    cracker_id: CrackerId,
     #[allow(dead_code)]
     binary_path: PathBuf,
     #[allow(dead_code)]
@@ -15,7 +15,7 @@ pub struct GenericCracker {
 }
 
 impl GenericCracker {
-    pub fn new(cracker_id: u64, binary_path: PathBuf, paths: crate::config::Paths) -> Self {
+    pub fn new(cracker_id: CrackerId, binary_path: PathBuf, paths: crate::config::Paths) -> Self {
         Self {
             cracker_id,
             binary_path,

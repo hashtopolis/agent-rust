@@ -9,6 +9,7 @@ use crate::model::{Chunk, ProgressReport};
 use crate::process::{self, ProcessSpec};
 
 use super::HashcatInvocation;
+use super::progress::ProgressMode;
 use super::status::{self, HashcatStatus};
 
 const CHANNEL_CAPACITY: usize = 256;
@@ -21,6 +22,7 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 pub(super) async fn run<S: ProgressSink>(
     invocation: HashcatInvocation,
     chunk: Chunk,
+    progress_mode: ProgressMode,
     sink: &S,
 ) -> Result<ChunkOutcome, CrackerError> {
     prepare_outfile(&invocation.outfile).await?;
@@ -85,7 +87,7 @@ pub(super) async fn run<S: ProgressSink>(
     );
     keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    let mut state = ChunkRun::new(chunk, invocation.preprocessor.is_some());
+    let mut state = ChunkRun::new(chunk, invocation.preprocessor.is_some(), progress_mode);
 
     loop {
         tokio::select! {
@@ -183,10 +185,11 @@ struct ChunkRun {
     last_progress: Option<Progress>,
     first_status: bool,
     stopped: bool,
+    progress: ProgressMode,
 }
 
 impl ChunkRun {
-    fn new(chunk: Chunk, piped: bool) -> Self {
+    fn new(chunk: Chunk, piped: bool, progress: ProgressMode) -> Self {
         Self {
             chunk,
             piped,
@@ -194,6 +197,7 @@ impl ChunkRun {
             last_progress: None,
             first_status: false,
             stopped: false,
+            progress,
         }
     }
 
@@ -237,24 +241,8 @@ impl ChunkRun {
         self.flush(sink, invocation, &progress).await
     }
 
-    /// A chunk's progress does not start at zero, so we offset by where this
-    /// chunk begins in the whole keyspace and scale the remainder to basis
-    /// points (0..=10000).
-    fn progress_from(&self, status: &HashcatStatus) -> Progress {
-        let total = status.progress_total();
-        let span = self.chunk.skip + self.chunk.length;
-
-        let chunk_start = total
-            .checked_div(span)
-            .map(|per_unit| per_unit * self.chunk.skip)
-            .unwrap_or(0);
-
-        let relative_progress = if total > chunk_start {
-            ((status.progress().saturating_sub(chunk_start) as u128) * 10_000
-                / (total - chunk_start) as u128) as u64
-        } else {
-            0
-        };
+    fn progress_from(&mut self, status: &HashcatStatus) -> Progress {
+        let relative_progress = self.progress.basis_points(status, &self.chunk, self.piped);
 
         let temps = status.temps();
         let utils = status.utils();
