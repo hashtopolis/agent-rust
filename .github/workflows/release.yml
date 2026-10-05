@@ -1,0 +1,46 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  bundle:
+    name: build rust-agent.zip
+    permissions:
+      # Required so action-gh-release can create/update the release.
+      contents: write
+    # macOS host: builds the apple target natively (zig's linker duplicates the
+    # IOKit framework, which macOS dyld rejects) and cross-builds the linux-musl
+    # and windows-gnu targets via cargo-zigbuild.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: >-
+            x86_64-unknown-linux-musl,
+            aarch64-unknown-linux-musl,
+            x86_64-pc-windows-gnu,
+            aarch64-apple-darwin
+
+      # Installs zig + cargo-zigbuild as pinned in mise.toml.
+      - uses: jdx/mise-action@v2
+
+      - name: Bundle
+        run: ./scripts/bundle.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-agent
+          path: dist/rust-agent.zip
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/rust-agent.zip

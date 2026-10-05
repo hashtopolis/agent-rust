@@ -36,6 +36,10 @@ pub enum ProvisionError {
         expected: u64,
         actual: u64,
     },
+    #[error("no hashcat.osx in the cracker archive and cracker.hashcat_path is not set")]
+    HashcatFallbackMissing,
+    #[error("cracker.hashcat_path is not a usable hashcat binary or install: {}", path.display())]
+    HashcatFallbackUnusable { path: PathBuf },
 }
 
 /// The agent lends its [`Client`] into each call so the auth token has a single
@@ -84,13 +88,55 @@ pub trait Provisioner<T: Transport> {
 
 pub struct DiskProvisioner<D: Downloader> {
     paths: Paths,
+    hashcat_fallback: Option<PathBuf>,
     downloader: D,
 }
 
 impl<D: Downloader> DiskProvisioner<D> {
-    pub fn new(paths: Paths, downloader: D) -> Self {
-        Self { paths, downloader }
+    pub fn new(paths: Paths, hashcat_fallback: Option<PathBuf>, downloader: D) -> Self {
+        Self {
+            paths,
+            hashcat_fallback,
+            downloader,
+        }
     }
+
+    /// Resolve the configured fallback to a hashcat binary. Required since
+    /// hashcat does not bundle an OSX binary in the official archive. `announced` is tried
+    /// first when it points at a directory.
+    async fn resolve_hashcat_fallback(&self, announced: &str) -> Result<PathBuf, ProvisionError> {
+        let configured = self
+            .hashcat_fallback
+            .as_ref()
+            .ok_or(ProvisionError::HashcatFallbackMissing)?;
+
+        resolve_local_hashcat(configured, announced)
+            .await
+            .ok_or_else(|| ProvisionError::HashcatFallbackUnusable {
+                path: configured.clone(),
+            })
+    }
+}
+
+/// Resolve a hashcat path: the file itself, or a known binary inside a directory.
+async fn resolve_local_hashcat(path: &Path, announced: &str) -> Option<PathBuf> {
+    let path = absolute(path.to_path_buf());
+    let metadata = tokio::fs::metadata(&path).await.ok()?;
+
+    if metadata.is_file() {
+        return Some(path);
+    }
+
+    if metadata.is_dir() {
+        for name in [announced, "hashcat", "hashcat.bin", "hashcat.osx"] {
+            let candidate = path.join(name);
+            if path_exists(&candidate).await {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
 }
 
 impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
@@ -160,10 +206,20 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
             let _ = tokio::fs::remove_file(&archive).await;
         }
 
-        let binary_path = cracker_dir.join(&info.binary);
+        let is_hashcat = info.name.eq_ignore_ascii_case("hashcat");
+
+        let mut binary_path = cracker_dir.join(&info.binary);
+
+        // On macOS the archive ships no hashcat binary; fall back to a local one
+        // when it is absent. The existence check still prefers an archived
+        // `hashcat.osx` if present.
+        if is_hashcat && cfg!(target_os = "macos") && !path_exists(&binary_path).await {
+            binary_path = self.resolve_hashcat_fallback(&info.binary).await?;
+        }
+
         make_executable(&binary_path).await?;
 
-        let kind = if info.name.eq_ignore_ascii_case("hashcat") {
+        let kind = if is_hashcat {
             CrackerKind::Hashcat
         } else {
             CrackerKind::Generic
@@ -443,7 +499,9 @@ fn io_at(path: &Path) -> impl FnOnce(io::Error) -> ProvisionError {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_plain_filename, with_bitness};
+    use super::{absolute, is_plain_filename, resolve_local_hashcat, with_bitness};
+
+    use tempfile::TempDir;
 
     #[test]
     fn bitness_is_inserted_before_the_extension() {
@@ -472,5 +530,63 @@ mod tests {
         assert!(!is_plain_filename("sub\\dir.txt"));
         assert!(!is_plain_filename("/etc/passwd"));
         assert!(!is_plain_filename(".."));
+    }
+
+    #[tokio::test]
+    async fn hashcat_fallback_resolves_a_file_path_directly() {
+        let tmp = TempDir::new().unwrap();
+        let bin = tmp.path().join("hashcat");
+        tokio::fs::write(&bin, b"x").await.unwrap();
+
+        let resolved = resolve_local_hashcat(&bin, "hashcat.osx").await.unwrap();
+
+        assert_eq!(resolved, absolute(bin));
+    }
+
+    #[tokio::test]
+    async fn hashcat_fallback_prefers_the_announced_name_inside_a_directory() {
+        let tmp = TempDir::new().unwrap();
+        tokio::fs::write(tmp.path().join("hashcat.osx"), b"x")
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("hashcat.bin"), b"x")
+            .await
+            .unwrap();
+
+        let resolved = resolve_local_hashcat(tmp.path(), "hashcat.osx")
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.file_name().unwrap(), "hashcat.osx");
+    }
+
+    #[tokio::test]
+    async fn hashcat_fallback_falls_back_to_a_common_name_in_a_directory() {
+        let tmp = TempDir::new().unwrap();
+        tokio::fs::write(tmp.path().join("hashcat.bin"), b"x")
+            .await
+            .unwrap();
+
+        let resolved = resolve_local_hashcat(tmp.path(), "hashcat.osx")
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.file_name().unwrap(), "hashcat.bin");
+    }
+
+    #[tokio::test]
+    async fn hashcat_fallback_is_none_when_nothing_resolves() {
+        let tmp = TempDir::new().unwrap();
+
+        assert!(
+            resolve_local_hashcat(tmp.path(), "hashcat.osx")
+                .await
+                .is_none()
+        );
+        assert!(
+            resolve_local_hashcat(&tmp.path().join("nope"), "hashcat.osx")
+                .await
+                .is_none()
+        );
     }
 }
