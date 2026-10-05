@@ -83,7 +83,7 @@ pub trait Provisioner<T: Transport> {
         &self,
         client: &Client<T>,
         hashlist_id: u64,
-        cracker_id: CrackerId,
+        dest: &Path,
     ) -> Result<(), ProvisionError>;
 
     async fn check_client_version(&self, client: &Client<T>) -> Result<(), ProvisionError>;
@@ -350,15 +350,24 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
         Ok(())
     }
 
-    /// The potfile lands in the cracker's own directory, which is where hashcat
-    /// looks for it.
+    /// Downloads the hashlist's already-cracked ("found") hashes to `dest`, the
+    /// path the cracker later reads them back from. The caller owns that path (a
+    /// hashcat potfile today); this step only knows how to move the bytes. Like
+    /// the hashlist, it is re-fetched and overwritten on every task pickup,
+    /// picking up cracks found elsewhere since the last pickup. An empty found
+    /// list simply writes an empty file, so a fresh hashlist with no cracks yet
+    /// does not error.
     async fn ensure_found(
         &self,
-        _client: &Client<T>,
-        _hashlist_id: u64,
-        _cracker_id: CrackerId,
+        client: &Client<T>,
+        hashlist_id: u64,
+        dest: &Path,
     ) -> Result<(), ProvisionError> {
-        todo!("Not yet implemented")
+        let info = client.get_found(hashlist_id).await?;
+
+        self.downloader.download(&info.url, dest).await?;
+
+        Ok(())
     }
 
     async fn check_client_version(&self, client: &Client<T>) -> Result<(), ProvisionError> {
@@ -705,5 +714,164 @@ mod tests {
 
         // Nothing should have been written to the files directory.
         assert!(!tmp.path().join("files").join("evil").exists());
+    }
+
+    mod ensure_found {
+        use super::super::{DiskProvisioner, ProvisionError, Provisioner};
+        use super::{PanicDownloader, paths_in};
+
+        use crate::client::Client;
+        use crate::download::{DownloadError, Downloader};
+        use crate::transport::{Transport, TransportError};
+
+        use std::path::{Path, PathBuf};
+        use std::sync::{Arc, Mutex};
+
+        use serde_json::{Value, json};
+        use tempfile::TempDir;
+
+        #[derive(Clone)]
+        struct Download {
+            url: String,
+            dest: PathBuf,
+        }
+
+        type Recorded = Arc<Mutex<Option<Download>>>;
+
+        struct FoundTransport {
+            url: String,
+        }
+
+        impl Transport for FoundTransport {
+            async fn post_json(&self, _body: &Value) -> Result<Value, TransportError> {
+                Ok(json!({ "response": "SUCCESS", "url": self.url }))
+            }
+        }
+
+        #[derive(Clone)]
+        struct RecordingDownloader {
+            recorded: Recorded,
+        }
+
+        impl Downloader for RecordingDownloader {
+            async fn download(&self, url: &str, dest: &Path) -> Result<(), DownloadError> {
+                if let Some(parent) = dest.parent() {
+                    tokio::fs::create_dir_all(parent).await.map_err(|source| {
+                        DownloadError::Write {
+                            path: parent.to_path_buf(),
+                            source,
+                        }
+                    })?;
+                }
+
+                tokio::fs::write(dest, url.as_bytes())
+                    .await
+                    .map_err(|source| DownloadError::Write {
+                        path: dest.to_path_buf(),
+                        source,
+                    })?;
+
+                *self.recorded.lock().unwrap() = Some(Download {
+                    url: url.to_owned(),
+                    dest: dest.to_path_buf(),
+                });
+
+                Ok(())
+            }
+        }
+
+        #[tokio::test]
+        async fn downloads_the_found_file_to_the_given_path() {
+            let tmp = TempDir::new().unwrap();
+            let dest = tmp.path().join("crackers/3/hashcat.potfile");
+
+            let recorded = Arc::new(Mutex::new(None));
+            let downloader = RecordingDownloader {
+                recorded: recorded.clone(),
+            };
+            let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, downloader);
+            let client = Client::new(FoundTransport {
+                url: "hashlists/leftover/7".to_owned(),
+            });
+
+            provisioner
+                .ensure_found(&client, 7, &dest)
+                .await
+                .expect("ensure_found should download the found file");
+
+            let download = recorded
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("a download must be attempted");
+
+            // The server's found url is handed to the downloader untouched; the
+            // downloader is what resolves relative-vs-absolute, exactly as for
+            // the hashlist.
+            assert_eq!(download.url, "hashlists/leftover/7");
+            // The found hashes land at exactly the path the caller chose; the
+            // provisioner adds no filename of its own.
+            assert_eq!(download.dest, dest);
+            assert!(dest.exists(), "the found file should be written to disk");
+        }
+
+        struct RejectingTransport;
+
+        impl Transport for RejectingTransport {
+            async fn post_json(&self, _body: &Value) -> Result<Value, TransportError> {
+                Ok(json!({ "response": "ERROR", "message": "no such hashlist" }))
+            }
+        }
+
+        #[tokio::test]
+        async fn a_server_rejection_surfaces_as_an_error_not_a_panic() {
+            let tmp = TempDir::new().unwrap();
+
+            let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, PanicDownloader);
+            let client = Client::new(RejectingTransport);
+
+            let error = provisioner
+                .ensure_found(&client, 7, &tmp.path().join("unused.potfile"))
+                .await
+                .expect_err("a rejected getFound must surface as an error");
+
+            assert!(matches!(error, ProvisionError::Client(_)), "got {error:?}");
+        }
+
+        #[tokio::test]
+        async fn a_present_destination_is_re_fetched_and_overwritten() {
+            let tmp = TempDir::new().unwrap();
+            let dest = tmp.path().join("crackers/3/hashcat.potfile");
+
+            // Seed a stale file at the destination.
+            tokio::fs::create_dir_all(dest.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(&dest, b"stale").await.unwrap();
+
+            let recorded = Arc::new(Mutex::new(None));
+            let downloader = RecordingDownloader {
+                recorded: recorded.clone(),
+            };
+            let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, downloader);
+            let client = Client::new(FoundTransport {
+                url: "hashlists/leftover/7".to_owned(),
+            });
+
+            provisioner.ensure_found(&client, 7, &dest).await.unwrap();
+
+            // Unlike ensure_files, ensure_found never skips a present file: it
+            // always re-downloads so cracks found elsewhere since the last pickup
+            // are included.
+            assert!(
+                recorded.lock().unwrap().is_some(),
+                "a present file must still be re-fetched"
+            );
+            let contents = tokio::fs::read_to_string(&dest).await.unwrap();
+            assert_eq!(
+                contents, "hashlists/leftover/7",
+                "the stale file is overwritten"
+            );
+        }
     }
 }

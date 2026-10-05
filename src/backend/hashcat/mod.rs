@@ -18,7 +18,7 @@ use crate::backend::args::Args;
 use argv::path_arg;
 
 /// Modern hashcat (v6+) crack-record format `hash:plain:hex_plain:crack_pos`.
-/// The old `15` format for pre-6.0 binaries is not supported yet.
+/// The old `15` format for pre-6.0 binaries is not supported.
 pub(super) const OUTFILE_FORMAT: &str = "1,2,3,4";
 
 pub struct HashcatCracker {
@@ -75,15 +75,20 @@ impl HashcatCracker {
             .arg("-l")
             .arg(chunk.length.to_string());
 
-        // With brain, hashcat coordinates work centrally; without it we disable
-        // the potfile and let hashcat strip cracked hashes from the list itself.
+        // With brain, hashcat coordinates work centrally and consults a potfile
+        // instead of removing cracked hashes from the list. We point it at the
+        // exact file the provisioner filled via getFound, rather than trusting
+        // hashcat's version- and platform-dependent default potfile location.
+        // Without brain we disable the potfile and let hashcat strip cracked
+        // hashes from the list itself.
         let builder = match &task.brain {
             Some(brain) => builder
                 .arg("--brain-client")
                 .arg(format!("--brain-host={}", brain.host))
                 .arg(format!("--brain-port={}", brain.port))
                 .arg(format!("--brain-password={}", brain.pass))
-                .arg(format!("--brain-client-features={}", brain.features)),
+                .arg(format!("--brain-client-features={}", brain.features))
+                .arg(format!("--potfile-path={}", path_arg(&self.potfile()))),
             None => builder
                 .arg("--potfile-disable")
                 .arg("--remove")
@@ -168,5 +173,191 @@ impl Cracker for HashcatCracker {
         hashes: &[String],
     ) -> Result<HealthCheckOutcome, CrackerError> {
         healthcheck::run(self, attack, hashlist_alias, hashes).await
+    }
+
+    fn found_hashes_path(&self) -> Option<PathBuf> {
+        Some(self.potfile())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use crate::config::Paths;
+    use crate::model::{BenchmarkType, BrainConfig, Chunk, TaskAssignment};
+
+    use super::progress::ProgressMode;
+    use super::{HashcatCracker, path_arg};
+
+    const CRACKER_ID: u64 = 4;
+
+    fn cracker() -> HashcatCracker {
+        HashcatCracker {
+            cracker_id: CRACKER_ID,
+            binary_path: PathBuf::from("/opt/crackers/4/hashcat.bin"),
+            paths: Paths::default(),
+            progress_mode: ProgressMode::Absolute,
+        }
+    }
+
+    fn task(brain: Option<BrainConfig>) -> TaskAssignment {
+        TaskAssignment {
+            task_id: 1,
+            cracker_id: CRACKER_ID,
+            attack_command: "#HL# -a 3 ?a?a?a".into(),
+            cmd_parameters: String::new(),
+            hashlist_id: 7,
+            benchmark: 30,
+            status_timer: 5,
+            files: Vec::new(),
+            bench_type: BenchmarkType::Speed,
+            hashlist_alias: "#HL#".into(),
+            keyspace: 0,
+            enforce_pipe: false,
+            slow_hash: false,
+            preprocessor: None,
+            brain,
+        }
+    }
+
+    const CHUNK: Chunk = Chunk {
+        id: 1,
+        skip: 10,
+        length: 20,
+    };
+
+    fn brain() -> BrainConfig {
+        BrainConfig {
+            host: "brain.example".into(),
+            port: 6863,
+            pass: "secret".into(),
+            features: 3,
+        }
+    }
+
+    /// The value hashcat takes as the separate argv token after `flag` (as in
+    /// `-s 10`). Panics if the flag is absent or has no following token.
+    fn value_after<'a>(args: &'a [String], flag: &str) -> &'a str {
+        let index = args
+            .iter()
+            .position(|arg| arg == flag)
+            .unwrap_or_else(|| panic!("no {flag} in {args:?}"));
+
+        args.get(index + 1)
+            .unwrap_or_else(|| panic!("{flag} has no value in {args:?}"))
+    }
+
+    #[test]
+    fn a_plain_chunk_run_emits_the_baseline_flags() {
+        let cracker = cracker();
+
+        let invocation = cracker.build_command(&task(None), &CHUNK).unwrap();
+        let args = &invocation.args;
+
+        // Static flags every chunk run carries.
+        for flag in [
+            "--machine-readable",
+            "--quiet",
+            "--status",
+            "--restore-disable",
+            "--session=hashtopolis",
+            "--outfile-format=1,2,3,4",
+        ] {
+            assert!(
+                args.iter().any(|arg| arg == flag),
+                "missing {flag}: {args:?}"
+            );
+        }
+
+        // Both timers are driven by the task's status_timer (5 here).
+        assert!(args.contains(&"--status-timer=5".to_string()));
+        assert!(args.contains(&"--outfile-check-timer=5".to_string()));
+
+        // The chunk window becomes -s (skip) and -l (length).
+        assert_eq!(value_after(args, "-s"), "10");
+        assert_eq!(value_after(args, "-l"), "20");
+
+        // -p is the tab separator; -o points at the hashlist outfile; zaps are
+        // watched in the outfile-check-dir.
+        assert_eq!(value_after(args, "-p"), "\t");
+        assert_eq!(value_after(args, "-o"), path_arg(&invocation.outfile));
+        assert!(args.contains(&format!(
+            "--outfile-check-dir={}",
+            path_arg(&invocation.zaps_dir)
+        )));
+    }
+
+    #[test]
+    fn the_attack_and_extra_parameters_are_appended() {
+        let cracker = cracker();
+
+        // Flag and mask tokens only, so nothing resolves against the files dir;
+        // file-token resolution is covered by the resolve_attack tests.
+        let mut task = task(None);
+        task.attack_command = "#HL# -a 3 ?a?a?a".into();
+        task.cmd_parameters = "-O -w 4".into();
+
+        let args = cracker.build_command(&task, &CHUNK).unwrap().args;
+
+        // The alias is replaced by the hashlist path and the attack tokens follow.
+        assert!(args.iter().any(|arg| Path::new(arg).ends_with("7")));
+        assert!(args.iter().any(|arg| arg == "?a?a?a"));
+
+        // Extra parameters are split into tokens and appended.
+        for token in ["-O", "-w", "4"] {
+            assert!(
+                args.iter().any(|arg| arg == token),
+                "missing extra parameter {token}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_brain_run_pins_the_potfile_path_and_leaves_it_enabled() {
+        let cracker = cracker();
+
+        let invocation = cracker.build_command(&task(Some(brain())), &CHUNK).unwrap();
+
+        let args = &invocation.args;
+
+        // The full brain connection is described from the task's BrainConfig.
+        for flag in [
+            "--brain-client",
+            "--brain-host=brain.example",
+            "--brain-port=6863",
+            "--brain-password=secret",
+            "--brain-client-features=3",
+            &format!("--potfile-path={}", path_arg(&cracker.potfile())),
+        ] {
+            assert!(
+                args.iter().any(|arg| arg == flag),
+                "missing {flag}: {args:?}"
+            );
+        }
+
+        // Brain consults the potfile, so it must never be disabled, nor should the
+        // non-brain removal flags appear.
+        assert!(!args.iter().any(|arg| arg == "--potfile-disable"));
+        assert!(!args.iter().any(|arg| arg == "--remove"));
+    }
+
+    #[test]
+    fn a_non_brain_run_disables_the_potfile_and_removes_cracked_hashes() {
+        let cracker = cracker();
+
+        let args = cracker.build_command(&task(None), &CHUNK).unwrap().args;
+
+        // The non-brain branch strips cracked hashes from the list itself.
+        assert!(args.iter().any(|arg| arg == "--potfile-disable"));
+        assert!(args.iter().any(|arg| arg == "--remove"));
+        assert!(args.contains(&"--remove-timer=5".to_string()));
+
+        // None of the brain wiring leaks into a plain run.
+        assert!(!args.iter().any(|arg| arg == "--brain-client"));
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("--potfile-path=")),
+            "a non-brain run has no downloaded potfile to point at"
+        );
     }
 }

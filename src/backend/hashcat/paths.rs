@@ -26,6 +26,15 @@ impl HashcatCracker {
     pub(super) fn zaps_dir(&self, hashlist_id: u64) -> PathBuf {
         absolute(self.paths.zaps.join(format!("hashlist_{hashlist_id}")))
     }
+
+    pub(super) fn potfile(&self) -> PathBuf {
+        absolute(
+            self.paths
+                .crackers
+                .join(self.cracker_id.to_string())
+                .join("hashcat.potfile"),
+        )
+    }
 }
 
 /// Make `path` absolute without touching the filesystem, falling back to the

@@ -98,6 +98,11 @@ pub trait Cracker {
         hashlist_alias: &str,
         hashes: &[String],
     ) -> Result<HealthCheckOutcome, CrackerError>;
+
+    /// Where this cracker wants already-cracked ("found") hashes staged before a
+    /// run, if it consumes them. hashcat returns its potfile path so a brain run
+    /// can skip solved work; a cracker with no such file returns `None`.
+    fn found_hashes_path(&self) -> Option<PathBuf>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
