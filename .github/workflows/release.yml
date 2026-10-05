@@ -66,10 +66,12 @@ jobs:
       - name: Package
         run: ./scripts/bundle.sh package
 
+      # Upload the zip as-is so the download is not wrapped in a second zip.
+      # The artifact is named after the file (rust-agent.zip).
       - uses: actions/upload-artifact@v7
         with:
-          name: rust-agent
           path: dist/rust-agent.zip
+          archive: false
           if-no-files-found: error
 
       - name: Attach to release
