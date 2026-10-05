@@ -228,16 +228,16 @@ async fn invalid_token_in_the_loop_is_fatal() {
 }
 
 #[tokio::test]
-async fn getchunk_transport_error_backs_off_without_dying() {
-    // getTask succeeds; getChunk replies with a server error (not a token one).
+async fn getchunk_server_error_backs_off_and_drops_the_task() {
     let mut rig = AgentRig::rig([
         task_reply(25, 45, 13),
-        json!({"action": "getChunk", "response": "ERROR", "message": "boom"}),
+        json!({"action": "getChunk", "response": "ERROR", "message": "You are not assigned to this task!"}),
     ]);
 
     let step = rig.tick().await.unwrap();
 
     assert_eq!(step, Step::Sleep(Duration::from_secs(5)));
+    assert!(rig.state.current_task().is_none());
 }
 
 #[tokio::test]
@@ -257,9 +257,9 @@ async fn a_run_chunk_tick_checks_version_during_prep_and_after_the_chunk() {
             Stage::Cracker,
             Stage::Files,
             Stage::Hashlist,
+            // task-change
             Stage::CheckVersion,
-            // The version check runs once in the task-change prep and again after the
-            // chunk completes
+            // chunk-complete
             Stage::CheckVersion,
         ]
     );
