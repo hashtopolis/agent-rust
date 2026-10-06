@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 
 use crate::cracker::{ChunkOutcome, CrackerError, ProgressCommand, ProgressSink};
-use crate::model::{Chunk, ProgressReport};
+use crate::model::{Chunk, Crack, ProgressReport};
 use crate::process::{self, ProcessSpec};
 use crate::sysinfo::CpuSampler;
 
@@ -300,7 +300,7 @@ impl ChunkRun {
 
             let cracks = self.pending[..take]
                 .iter()
-                .map(|line| line.split('\t').map(str::to_owned).collect())
+                .map(|line| Crack::Fields(line.split('\t').map(str::to_owned).collect()))
                 .collect();
 
             let report = ProgressReport {

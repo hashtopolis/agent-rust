@@ -1,7 +1,8 @@
 use std::path::Path;
 
+use crate::backend::paths::absolute;
+
 use super::HashcatCracker;
-use super::paths::absolute;
 
 impl HashcatCracker {
     /// Split the server's attack string into argv tokens, resolving each: the
