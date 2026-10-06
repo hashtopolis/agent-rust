@@ -75,8 +75,21 @@ jobs:
           archive: false
           if-no-files-found: error
 
+      # The staged binaries all share the name htp-agent, so flatten them into
+      # one directory under names that carry the target, since release assets
+      # live in a single flat namespace.
+      - name: Stage per-target binaries
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          mkdir -p dist/release
+          cp dist/rust-agent/x86_64-unknown-linux-musl/htp-agent  dist/release/htp-agent-x86_64-unknown-linux-musl
+          cp dist/rust-agent/aarch64-apple-darwin/htp-agent       dist/release/htp-agent-aarch64-apple-darwin
+          cp dist/rust-agent/x86_64-pc-windows-msvc/htp-agent.exe dist/release/htp-agent-x86_64-pc-windows-msvc.exe
+
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/rust-agent.zip
+          files: |
+            dist/rust-agent.zip
+            dist/release/*
