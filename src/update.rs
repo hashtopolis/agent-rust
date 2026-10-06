@@ -439,8 +439,8 @@ mod tests {
               "binaries": [
                 {{"path": "x86_64-unknown-linux-musl/htp-agent", "os": "linux", "arch": "x86_64",
                   "triples": ["x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu"]}},
-                {{"path": "x86_64-pc-windows-gnu/htp-agent.exe", "os": "windows", "arch": "x86_64",
-                  "triples": ["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"]}}
+                {{"path": "x86_64-pc-windows-msvc/htp-agent.exe", "os": "windows", "arch": "x86_64",
+                  "triples": ["x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu"]}}
               ]
             }}"#
         );
@@ -450,7 +450,7 @@ mod tests {
         zip.start_file("rust-agent/x86_64-unknown-linux-musl/htp-agent", opts)
             .unwrap();
         zip.write_all(b"linux-binary").unwrap();
-        zip.start_file("rust-agent/x86_64-pc-windows-gnu/htp-agent.exe", opts)
+        zip.start_file("rust-agent/x86_64-pc-windows-msvc/htp-agent.exe", opts)
             .unwrap();
         zip.write_all(b"windows-binary").unwrap();
         zip.finish().unwrap();
@@ -480,7 +480,7 @@ mod tests {
         let zip = build_bundle(tmp.path(), &newer_version());
         let dest = tmp.path().join("staged");
 
-        let staged = stage_from_zip(&zip, &dest, "x86_64-pc-windows-gnu").unwrap();
+        let staged = stage_from_zip(&zip, &dest, "x86_64-pc-windows-msvc").unwrap();
 
         match staged {
             StageResult::ReadyForSwap { path, version } => {
@@ -529,10 +529,10 @@ mod tests {
                     ],
                 },
                 BinaryEntry {
-                    path: "x86_64-pc-windows-gnu/htp-agent.exe".to_owned(),
+                    path: "x86_64-pc-windows-msvc/htp-agent.exe".to_owned(),
                     triples: vec![
-                        "x86_64-pc-windows-gnu".to_owned(),
                         "x86_64-pc-windows-msvc".to_owned(),
+                        "x86_64-pc-windows-gnu".to_owned(),
                     ],
                 },
             ],
@@ -549,14 +549,15 @@ mod tests {
 
     #[test]
     fn selects_via_an_equivalent_triple() {
-        // A gnu-built agent is served the musl binary; an msvc-built one the gnu.
+        // A gnu-built agent is served the musl binary on linux and the msvc one
+        // on windows.
         assert_eq!(
             select_binary(&manifest(), "x86_64-unknown-linux-gnu").unwrap(),
             "x86_64-unknown-linux-musl/htp-agent"
         );
         assert_eq!(
-            select_binary(&manifest(), "x86_64-pc-windows-msvc").unwrap(),
-            "x86_64-pc-windows-gnu/htp-agent.exe"
+            select_binary(&manifest(), "x86_64-pc-windows-gnu").unwrap(),
+            "x86_64-pc-windows-msvc/htp-agent.exe"
         );
     }
 

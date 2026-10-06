@@ -3,20 +3,19 @@
 # Build the agent per platform and bundle the binaries into
 # dist/rust-agent.zip, the artifact the backend serves as the "rust" agent type.
 #
-# Targets are built with plain `cargo build` on a host that has the matching C
-# toolchain (natively, or cross via MinGW for windows-gnu on linux), and macOS
-# only builds on macOS. The work is therefore split into two steps that the
-# release workflow runs on different runners:
+# Every target is built natively on its own OS (no cross-compilation), so the
+# work is split into two steps that the release workflow runs on different
+# runners:
 #
 #   ./scripts/bundle.sh build <rust-target> [cargo-subcommand]
 #       build one target and stage it under dist/rust-agent/. The subcommand
-#       defaults to `build` (system toolchain); pass e.g. `zigbuild` to
-#       cross-build with zig instead.
+#       defaults to `build` (native host, system linker); pass e.g. `zigbuild`
+#       to cross-build instead.
 #   ./scripts/bundle.sh package
 #       write the manifest and launchers for the staged binaries and zip them
 #
 # `package` requires a staged binary for every target below, so a full bundle
-# is only produced by CI (or by collecting the binaries from each runner).
+# is only produced by CI (or by collecting the binaries from each OS).
 #
 # Requires: rustup, cargo; `package` also needs jq and zip.
 
@@ -32,11 +31,11 @@ ZIP_PATH="$DIST_DIR/rust-agent.zip"
 # Each entry: <rust-target>|<binary-filename>|<os>|<arch>|<equivalent-triples-csv>
 # The binary is staged as <rust-target>/<binary-filename>. equivalent-triples
 # lets a running agent match its own compiled-in triple even when the bundle
-# ships a compatible build (musl serving gnu hosts; windows-gnu serving msvc
-# hosts).
+# ships a compatible build (musl serving gnu hosts; windows-msvc serving agents
+# built for windows-gnu).
 TARGETS=(
     "x86_64-unknown-linux-musl|$BIN_NAME|linux|x86_64|x86_64-unknown-linux-musl,x86_64-unknown-linux-gnu"
-    "x86_64-pc-windows-gnu|$BIN_NAME.exe|windows|x86_64|x86_64-pc-windows-gnu,x86_64-pc-windows-msvc"
+    "x86_64-pc-windows-msvc|$BIN_NAME.exe|windows|x86_64|x86_64-pc-windows-msvc,x86_64-pc-windows-gnu"
     "aarch64-apple-darwin|$BIN_NAME|macos|aarch64|aarch64-apple-darwin"
 )
 
