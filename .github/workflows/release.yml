@@ -7,40 +7,89 @@ on:
   workflow_dispatch:
 
 jobs:
+  build:
+    name: build ${{ matrix.target }}
+    # Every target builds natively on its own OS, so each one only needs the
+    # runner's own C toolchain (ring compiles C) and no cross-linker. Windows
+    # builds the msvc target that ci.yml tests on the same runner.
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: ${{ matrix.target }}
+
+      # musl-gcc for ring's C sources.
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: ./scripts/bundle.sh build ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/rust-agent/
+          if-no-files-found: error
+
   bundle:
     name: build rust-agent.zip
+    needs: build
     permissions:
       # Required so action-gh-release can create/update the release.
       contents: write
-    # macOS host: builds the apple target natively (zig's linker duplicates the
-    # IOKit framework, which macOS dyld rejects) and cross-builds the linux-musl
-    # and windows-gnu targets via cargo-zigbuild.
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # Each artifact holds its own <target>/ folder, so merging them rebuilds
+      # the staging tree that `bundle.sh package` expects.
+      - uses: actions/download-artifact@v8
         with:
-          target: >-
-            x86_64-unknown-linux-musl,
-            aarch64-unknown-linux-musl,
-            x86_64-pc-windows-gnu,
-            aarch64-apple-darwin
+          pattern: bin-*
+          path: dist/rust-agent
+          merge-multiple: true
 
-      # Installs zig + cargo-zigbuild as pinned in mise.toml.
-      - uses: jdx/mise-action@v2
+      - name: Package
+        run: ./scripts/bundle.sh package
 
-      - name: Bundle
-        run: ./scripts/bundle.sh
-
-      - uses: actions/upload-artifact@v4
+      # Upload the zip as-is so the download is not wrapped in a second zip.
+      # The artifact is named after the file (rust-agent.zip).
+      - uses: actions/upload-artifact@v7
         with:
-          name: rust-agent
           path: dist/rust-agent.zip
+          archive: false
           if-no-files-found: error
+
+      # The staged binaries all share the name htp-agent, so flatten them into
+      # one directory under names that carry the target, since release assets
+      # live in a single flat namespace.
+      - name: Stage per-target binaries
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          mkdir -p dist/release
+          cp dist/rust-agent/x86_64-unknown-linux-musl/htp-agent  dist/release/htp-agent-x86_64-unknown-linux-musl
+          cp dist/rust-agent/aarch64-apple-darwin/htp-agent       dist/release/htp-agent-aarch64-apple-darwin
+          cp dist/rust-agent/x86_64-pc-windows-msvc/htp-agent.exe dist/release/htp-agent-x86_64-pc-windows-msvc.exe
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          files: dist/rust-agent.zip
+          files: |
+            dist/rust-agent.zip
+            dist/release/*

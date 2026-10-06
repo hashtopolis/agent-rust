@@ -15,8 +15,8 @@ jobs:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           components: rustfmt
       - name: Rustfmt Check
@@ -30,8 +30,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           components: clippy
       - name: Clippy Check
@@ -44,8 +44,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
       # Windows runners ship no rsync, so only unix hosts opt into the rsync test.
       - name: Enable rsync test
         if: runner.os != 'Windows'

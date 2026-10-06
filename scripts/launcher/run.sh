@@ -10,9 +10,8 @@ os="$(uname -s)"
 arch="$(uname -m)"
 
 case "$os/$arch" in
-  Darwin/arm64)              bin="aarch64-apple-darwin/htp-agent" ;;
-  Linux/x86_64)              bin="x86_64-unknown-linux-musl/htp-agent" ;;
-  Linux/aarch64 | Linux/arm64) bin="aarch64-unknown-linux-musl/htp-agent" ;;
+  Darwin/arm64) bin="aarch64-apple-darwin/htp-agent" ;;
+  Linux/x86_64) bin="x86_64-unknown-linux-musl/htp-agent" ;;
   *)
     echo "rust-agent: no bundled binary for $os/$arch" >&2
     exit 1
