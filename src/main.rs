@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use tracing_subscriber::EnvFilter;
 
 use htp_agent::agent::{Agent, deregister};
+use htp_agent::backend::hashcat::AutoPipePolicy;
 use htp_agent::cli::Cli;
 use htp_agent::client::Client;
 use htp_agent::config::Config;
@@ -58,9 +59,18 @@ async fn run(cli: Cli) -> Result<()> {
         tracing::warn!("hashcat_path is only used on macOS; ignoring it on this platform");
     }
 
+    let behavior = &config.settings().behavior;
+    let auto_pipe = behavior.allow_piping.then_some(AutoPipePolicy {
+        util_threshold: behavior.piping_threshold,
+    });
+
     let downloader = HttpDownloader::new(reqwest::Client::new(), transport.url());
-    let provisioner =
-        DiskProvisioner::new(config.settings().paths.clone(), hashcat_path, downloader);
+    let provisioner = DiskProvisioner::new(
+        config.settings().paths.clone(),
+        hashcat_path,
+        auto_pipe,
+        downloader,
+    );
 
     let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
     agent.run().await?;

@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 use crate::archive::{self, ArchiveError};
+use crate::backend::hashcat::AutoPipePolicy;
 use crate::client::{Client, ClientError};
 use crate::config::Paths;
 use crate::cracker::{AnyCracker, Cracker, CrackerError, CrackerKind, build_cracker};
@@ -92,14 +93,21 @@ pub trait Provisioner<T: Transport> {
 pub struct DiskProvisioner<D: Downloader> {
     paths: Paths,
     hashcat_fallback: Option<PathBuf>,
+    auto_pipe: Option<AutoPipePolicy>,
     downloader: D,
 }
 
 impl<D: Downloader> DiskProvisioner<D> {
-    pub fn new(paths: Paths, hashcat_fallback: Option<PathBuf>, downloader: D) -> Self {
+    pub fn new(
+        paths: Paths,
+        hashcat_fallback: Option<PathBuf>,
+        auto_pipe: Option<AutoPipePolicy>,
+        downloader: D,
+    ) -> Self {
         Self {
             paths,
             hashcat_fallback,
+            auto_pipe,
             downloader,
         }
     }
@@ -228,7 +236,14 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
             CrackerKind::Generic
         };
 
-        let cracker = build_cracker(kind, cracker_id, binary_path, self.paths.clone()).await?;
+        let cracker = build_cracker(
+            kind,
+            cracker_id,
+            binary_path,
+            self.paths.clone(),
+            self.auto_pipe,
+        )
+        .await?;
 
         Ok(cracker)
     }
@@ -690,7 +705,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_files_rejects_a_name_that_escapes_the_files_directory() {
         let tmp = TempDir::new().unwrap();
-        let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, PanicDownloader);
+        let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, None, PanicDownloader);
         let client = Client::new(PanicTransport);
 
         let mut unsafe_names = vec!["../evil", "/etc/cron.d/evil", "sub/evil", ".."];
@@ -789,7 +804,7 @@ mod tests {
             let downloader = RecordingDownloader {
                 recorded: recorded.clone(),
             };
-            let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, downloader);
+            let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, None, downloader);
             let client = Client::new(FoundTransport {
                 url: "hashlists/leftover/7".to_owned(),
             });
@@ -827,7 +842,8 @@ mod tests {
         async fn a_server_rejection_surfaces_as_an_error_not_a_panic() {
             let tmp = TempDir::new().unwrap();
 
-            let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, PanicDownloader);
+            let provisioner =
+                DiskProvisioner::new(paths_in(tmp.path()), None, None, PanicDownloader);
             let client = Client::new(RejectingTransport);
 
             let error = provisioner
@@ -853,7 +869,7 @@ mod tests {
             let downloader = RecordingDownloader {
                 recorded: recorded.clone(),
             };
-            let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, downloader);
+            let provisioner = DiskProvisioner::new(paths_in(tmp.path()), None, None, downloader);
             let client = Client::new(FoundTransport {
                 url: "hashlists/leftover/7".to_owned(),
             });

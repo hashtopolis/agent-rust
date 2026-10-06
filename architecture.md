@@ -55,19 +55,24 @@ src/
     mod.rs           # backend module list
     args.rs          # fluent argv builder
     hashcat/
-      mod.rs         # HashcatCracker, build_command, Cracker impl, invocation type
+      mod.rs         # HashcatCracker, run_chunk orchestration, ChunkSource, Cracker impl
       chunk.rs       # one chunk run: spawn, multiplex stdout/stderr/outfile, report back
+      producer.rs    # command assembly per ChunkSource; the producer half of a piped run
+      auto_pipe.rs   # slow-hash auto-pipe: policy, static gate and live utilisation probe
       keyspace.rs    # --keyspace measurement
       benchmark.rs   # speed and runtime benchmarks
       healthcheck.rs # health-check run over a known hashlist
       paths.rs       # filesystem layout: binary cwd, hashlist/outfile/zap paths
       argv.rs        # attack string -> argv tokens, parameter splitting
       status.rs      # hashcat status parser + ANSI stripping
-      preprocessor.rs # piped run: <preprocessor> | hashcat
       progress.rs    # scale hashcat PROGRESS to basis points; pin the reporting convention
     generic/
-      mod.rs         # GenericCracker
-      status.rs      # generic status parser
+      mod.rs         # GenericCracker, Cracker impl
+      chunk.rs       # one chunk run: spawn, read status/cracks, report back
+      keyspace.rs    # keyspace measurement
+      benchmark.rs   # benchmark run
+      paths.rs       # filesystem layout: binary cwd, hashlist/zap paths
+      status.rs      # generic status parser (STATUS <progress> <speed>)
 
 tests/
   agent/           # integration tests for bootstrap, deregister and the loop
@@ -81,19 +86,21 @@ tests/
   - **agent/run.rs** — the run loop, in a second `impl Agent` block. Asks `client` for work, dispatches tasks/chunks to a backend via the `Cracker` trait, reports progress, holds the state machine. `tick` performs one iteration and returns a `Step` (continue / sleep / shutdown) instead of sleeping itself, so `run` owns all timing and the shutdown signal and the loop stays testable.
   - **agent/progress.rs** — `ClientSink`, which adapts the `Client` into the `ProgressSink` the backends report through.
 - **cli.rs** — clap argument parser; maps flags to config `Overrides`.
-- **cracker.rs** — defines the `Cracker` trait and a factory that selects the hashcat or generic backend.
+- **cracker.rs** — defines the `Cracker` trait and a factory that selects the hashcat or generic backend, forwarding the auto-pipe policy (derived from config, threaded via the provisioner) to the hashcat backend.
 - **provisioner.rs** — the `Provisioner` trait plus its on-disk implementation. Everything the `Client` does not cover: crackers, preprocessors, task files, hashlists and founds fetched and placed where the backend expects them. A trait so the loop can run against a fake. The associated `Cracker` type lets that fake hand the loop a fake cracker.
 - **download.rs** — the `Downloader` trait and its reqwest implementation: a url streamed to a path. Separate from `transport.rs` because the JSON API is one POST endpoint while assets are GETs against arbitrary urls with no useful request timeout.
 - **archive.rs**: in-process 7z extraction via `sevenz-rust2`. `extract_into` drops an archive's contents at the destination root (wordlists); `extract_flattened` collapses a single wrapping folder (crackers, preprocessors).
 - **identity.rs** — what this build calls itself: agent type, version, and the `clientSignature` sent on login.
 - **backend/** — one submodule per supported binary, plus **backend/args.rs**: the fluent `Args` builder both backends use to assemble an argv (accepts borrowed or owned tokens, allocates once on `build`).
-  - **hashcat/mod.rs** — `HashcatCracker`, `build_command` (assembles the chunk argv and the paths it reads back from), and the `Cracker` impl that routes each operation to its module.
-  - **hashcat/chunk.rs** — a single chunk run: spawn hashcat as a process group, multiplex stdout, stderr and the tailed outfile onto one channel, and report progress and cracks until the process exits or the server orders a stop.
+  - **hashcat/mod.rs** — `HashcatCracker` and the `Cracker` impl that routes each operation to its module. `run_chunk` is the piping-aware orchestrator: it picks a `ChunkSource` (direct, preprocessor, or self-pipe), runs the chunk, and on a slow-hash starvation signal rebuilds the same chunk as a self-pipe and runs it once more. Piping never leaks past this function.
+  - **hashcat/chunk.rs** — a single chunk run: spawn hashcat (and its producer, if any) as process groups, multiplex stdout, stderr and the tailed outfile onto one channel, and report progress and cracks until the process exits, the server orders a stop, or the auto-pipe probe asks to restart (`ChunkResult::Underutilised`).
+  - **hashcat/producer.rs** — command assembly. `build_invocation` turns a `ChunkSource` into the full argv from a shared consumer flag block, and builds the producer stage for a piped run: a preprocessor binary, or hashcat itself with `--stdout` for `enforce_pipe` and the slow-hash auto-pipe.
+  - **hashcat/auto_pipe.rs** — the slow-hash auto-pipe decision, kept out of the run loop. `AutoPipePolicy` (from `Behavior`) is the on/off plus utilisation threshold; `preconditions_met` is the static gate on the task; `should_repipe` is the live gate on per-status GPU utilisation.
   - **hashcat/keyspace.rs**, **benchmark.rs**, **healthcheck.rs** — the one-shot operations (keyspace measure; speed and runtime benchmarks; health check), each capturing the process output and parsing a result.
   - **hashcat/paths.rs** — the input-side filesystem layout: where the binary runs and where hashlists, outfiles and zap dirs live.
   - **hashcat/argv.rs** — the input-side token building: the server's attack string and extra parameters turned into argv tokens, with file references resolved to absolute paths.
   - **hashcat/status.rs** — the output side: parsing hashcat's machine-readable status lines into `HashcatStatus`, plus `strip_ansi` for cleaning its coloured output.
-  - **generic/** — the generic backend behind the same `Cracker` trait
+  - **generic/** — the generic backend (any non-hashcat binary) behind the same `Cracker` trait, split into the same per-operation modules as hashcat: `mod.rs` (the backend and `Cracker` impl), `chunk.rs` (one chunk run over a simpler `STATUS <progress> <speed>` grammar, with no piping, brain, or preprocessor), `keyspace.rs`, `benchmark.rs`, `paths.rs`, and `status.rs`.
 - **model/** — core domain types shared across modules (`TaskAssignment`, `Chunk`, response types, etc.) plus the wire layer they are decoded from:
   - **model/raw.rs** — serde-serializable wire DTOs for every server request/response and action: exactly what goes over the wire, before any interpretation.
   - **model/convert.rs** — translation between `raw` and the domain types
@@ -106,6 +113,4 @@ tests/
 
 ## Open questions / notes
 
-- **uftpd**: probably stays for multicast download — no in-process replacement found yet. Could be dropped.
-- **7z**: done. `archive.rs` extracts in-process via `sevenz-rust2` (pure Rust).
-- **Self-update packaging**: done. `scripts/bundle.sh` (cargo-zigbuild plus a native macOS build) produces `rust-agent.zip`: one binary per target (linux-musl x86_64 and aarch64, windows-gnu x86_64, macOS aarch64), a `manifest.json`, and `run.sh`/`run.bat` launchers. Served as the `rust` `AgentBinary`.
+- **uftpd**: dropped. Multicast download will not be implemented.
