@@ -152,6 +152,14 @@ Common settings also have CLI flags, which win over the config file:
 
 `--debug` (`-d`) turns on debug logging, and so does `RUST_LOG`.
 
+## hashcat compatibility
+
+Only hashcat 6.0 and newer is supported. The agent runs hashcat with
+`--machine-readable` and reads back its tab-separated `STATUS` lines for
+progress, speed, temperature and GPU utilisation, and it collects cracks with
+`--outfile-format=1,2,3,4`. The comma-separated outfile format follows the hashcat 6.0 outfile changes,
+so any earlier version may fail to report progress or even crash.
+
 ## Notes
 
 - The agent self-updates from the server by default. `--disable-update` (or
