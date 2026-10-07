@@ -4,6 +4,8 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -46,7 +48,7 @@ pub fn extract_flattened(archive: &Path, dest: &Path) -> Result<(), ArchiveError
     remove_dir_all_if_exists(dest)?;
 
     let source = single_wrapping_dir(&staging)?.unwrap_or_else(|| staging.clone());
-    fs::rename(&source, dest).map_err(io_at(dest))?;
+    with_retry(|| fs::rename(&source, dest)).map_err(io_at(dest))?;
 
     // A wrapping folder leaves the staging dir behind; a bare-file archive moved
     // staging itself and this is a no-op.
@@ -87,20 +89,62 @@ fn staging_sibling(dest: &Path) -> PathBuf {
 }
 
 fn remove_dir_all_if_exists(path: &Path) -> Result<(), ArchiveError> {
-    match fs::remove_dir_all(path) {
+    with_retry(|| match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(ArchiveError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
+        Err(e) => Err(e),
+    })
+    .map_err(io_at(path))
 }
 
 fn io_at(path: &Path) -> impl FnOnce(io::Error) -> ArchiveError {
     let path = path.to_path_buf();
 
     move |source| ArchiveError::Io { path, source }
+}
+
+/// Retry an fs operation that Windows can transiently refuse. Freshly written
+/// or just-deleted directory entries stay locked while antivirus and the search
+/// indexer finish scanning them, so `rename` and `remove_dir_all` come back with
+/// ERROR_ACCESS_DENIED (5) or ERROR_SHARING_VIOLATION (32) until the handle is
+/// released. A short backoff gives the scan time to let go; on other platforms
+/// those codes never arise, so the operation runs exactly once.
+fn with_retry<T>(op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    retry_while(is_transient, op)
+}
+
+/// The retry loop with the transient-error test injected, so it can be
+/// exercised on platforms where [`is_transient`] is a hard `false`.
+fn retry_while<T>(
+    is_transient: impl Fn(&io::Error) -> bool,
+    mut op: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    const MAX_ATTEMPTS: u32 = 10;
+    const BASE_DELAY: Duration = Duration::from_millis(20);
+
+    let mut attempt = 1;
+
+    loop {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt < MAX_ATTEMPTS && is_transient(&error) => {
+                thread::sleep(BASE_DELAY * attempt);
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn is_transient(error: &io::Error) -> bool {
+    // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION
+    matches!(error.raw_os_error(), Some(5) | Some(32))
+}
+
+#[cfg(not(windows))]
+fn is_transient(_error: &io::Error) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -186,6 +230,59 @@ mod tests {
             "binary"
         );
         assert_eq!(fs::read_to_string(dest.join("extra.txt")).unwrap(), "extra");
+    }
+
+    #[test]
+    fn retry_while_recovers_after_transient_failures() {
+        let mut attempts = 0;
+
+        let result = retry_while(
+            |_| true,
+            || {
+                attempts += 1;
+
+                if attempts < 3 {
+                    Err(io::Error::from_raw_os_error(5))
+                } else {
+                    Ok(attempts)
+                }
+            },
+        );
+
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn retry_while_returns_non_transient_errors_at_once() {
+        let mut attempts = 0;
+
+        let result = retry_while(
+            |_| false,
+            || {
+                attempts += 1;
+                Err::<(), _>(io::Error::from_raw_os_error(5))
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn retry_while_gives_up_after_the_attempt_cap() {
+        let mut attempts = 0;
+
+        let result = retry_while(
+            |_| true,
+            || {
+                attempts += 1;
+                Err::<(), _>(io::Error::from_raw_os_error(5))
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(attempts, 10);
     }
 
     #[test]
