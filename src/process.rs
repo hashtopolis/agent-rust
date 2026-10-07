@@ -12,6 +12,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::log;
+
 /// The full output of a process run to completion.
 pub struct Captured {
     pub stdout: String,
@@ -23,6 +25,8 @@ pub struct Captured {
 /// stdout/stderr piped and stdin closed. Leading its own group is what lets
 /// [`kill_group`] take down the process together with any children it spawns
 pub fn spawn_grouped(program: &Path, args: &[impl AsRef<str>], cwd: &Path) -> io::Result<Child> {
+    tracing::debug!(command = %log::Invocation { program, args }, "spawning process");
+
     let mut command = Command::new(program);
 
     command
@@ -78,6 +82,11 @@ where
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("producer stdout not captured"))?;
+
+    tracing::debug!(
+        command = %log::Invocation { program: consumer.program, args: consumer.args },
+        "spawning process"
+    );
 
     let mut consumer_command = Command::new(consumer.program);
     consumer_command

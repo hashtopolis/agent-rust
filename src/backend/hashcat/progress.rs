@@ -4,10 +4,12 @@
 //! onward it is relative to the chunk's start. `CURKU` remains absolute.
 
 use std::path::Path;
+use std::process::Output;
+
+use tokio::process::Command;
 
 use crate::cracker::CrackerError;
 use crate::model::Chunk;
-use crate::process;
 
 use super::status::HashcatStatus;
 
@@ -20,15 +22,19 @@ pub(super) enum ProgressMode {
 impl ProgressMode {
     /// Read the binary's version to select its progress convention.
     pub(super) async fn detect(binary: &Path) -> Result<Self, CrackerError> {
-        use process::{Captured, run_capture};
-
         let cwd = binary.parent().unwrap_or(Path::new("."));
 
-        let Captured {
+        // A one-line probe needs neither a process group nor the spawn log of
+        // `process::run_capture`, so it bypasses the shared helper.
+        let Output {
             stdout,
             stderr,
             status,
-        } = run_capture(binary, &["--version"], cwd)
+        } = Command::new(binary)
+            .arg("--version")
+            .current_dir(cwd)
+            .kill_on_drop(true)
+            .output()
             .await
             .map_err(|error| CrackerError::Process(error.to_string()))?;
 
@@ -36,10 +42,11 @@ impl ProgressMode {
             return Err(CrackerError::Process(format!(
                 "hashcat --version failed ({}): {}",
                 status,
-                stderr.trim()
+                String::from_utf8_lossy(&stderr).trim()
             )));
         }
 
+        let stdout = String::from_utf8_lossy(&stdout);
         let version = stdout.trim();
 
         let mode = ProgressMode::from_version(version).ok_or_else(|| {
@@ -90,14 +97,14 @@ impl ProgressMode {
             relative_from_absolute(status, chunk)
         };
 
-        tracing::debug!(
+        tracing::trace!(
             chunk = chunk.id,
             piped,
             relative,
             curku = status.curku(),
             progress = status.progress(),
             total = status.progress_total(),
-            basis_points,
+            relative_progress = basis_points,
             "chunk progress scaled"
         );
 
@@ -189,6 +196,58 @@ mod tests {
                 "{version}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    fn fake_hashcat(dir: &Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("hashcat");
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detect_reads_the_version_from_the_binary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let path = fake_hashcat(tmp.path(), "#!/bin/sh\necho 'v7.1.2-546-gc885beef'\n");
+        let mode = ProgressMode::detect(&path).await.unwrap();
+
+        assert_eq!(mode, ProgressMode::Relative);
+
+        let path = fake_hashcat(tmp.path(), "#!/bin/sh\necho 'v6.2.6'\n");
+        let mode = ProgressMode::detect(&path).await.unwrap();
+
+        assert_eq!(mode, ProgressMode::Absolute);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detect_rejects_a_failing_or_unparsable_binary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let path = fake_hashcat(tmp.path(), "#!/bin/sh\necho 'broken' >&2\nexit 1\n");
+        let error = ProgressMode::detect(&path).await.unwrap_err();
+
+        assert!(
+            matches!(&error, CrackerError::Process(message) if message.contains("broken")),
+            "{error:?}"
+        );
+
+        let path = fake_hashcat(tmp.path(), "#!/bin/sh\necho 'hashcat'\n");
+        let error = ProgressMode::detect(&path).await.unwrap_err();
+
+        assert!(matches!(error, CrackerError::Other(_)), "{error:?}");
+
+        let error = ProgressMode::detect(&tmp.path().join("missing"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CrackerError::Process(_)), "{error:?}");
     }
 
     #[test]

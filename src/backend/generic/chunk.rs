@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 use crate::cracker::{ChunkOutcome, CrackerError, ProgressCommand, ProgressSink};
+use crate::log;
 use crate::model::{Chunk, Crack, ProgressReport};
 use crate::process;
 
@@ -87,7 +88,7 @@ pub(super) async fn run<S: ProgressSink>(
             }
 
             _ = keepalive.tick(), if !state.first_status => {
-                let _ = sink.send_progress(state.keepalive_report()).await;
+                let _ = sink.send_progress(state.keepalive_report(), true).await;
             }
         }
     }
@@ -184,6 +185,13 @@ impl ChunkRun {
 
         self.last_progress = Some(progress.clone());
 
+        tracing::info!(
+            chunk_id = self.chunk.id,
+            progress = %log::Percent(progress.relative_progress),
+            speed = %log::HashRate(progress.speed),
+            "cracking status"
+        );
+
         self.flush(sink, zap_file, &progress).await
     }
 
@@ -226,7 +234,7 @@ impl ChunkRun {
                 ..Default::default()
             };
 
-            match sink.send_progress(report).await {
+            match sink.send_progress(report, false).await {
                 Ok(ProgressCommand::Continue { zaps }) => {
                     self.pending.drain(..take);
                     write_zap_file(zap_file, &zaps).await;
@@ -290,6 +298,8 @@ fn parse_stdout(line: String) -> Option<Event> {
     let status = GenericStatus::parse(&line);
 
     if status.is_valid() {
+        tracing::trace!(%line, "generic status line");
+
         Some(Event::Status(status))
     } else if line.contains(':') {
         // A non-status line with a colon is a cracked hash, stored stripped.
@@ -363,6 +373,7 @@ mod tests {
         async fn send_progress(
             &self,
             report: ProgressReport,
+            _is_keepalive: bool,
         ) -> Result<ProgressCommand, ProgressUpdateError> {
             let count = {
                 let mut reports = self.reports.lock().unwrap();

@@ -41,9 +41,12 @@ pub trait ProgressSink {
     /// `Err` is a delivery failure, not a reason to stop: the cracker backend keeps the
     /// unsent state and retries on the next update. A chunk stops only on an
     /// explicit `Stop` or a genuine local process fault (`CrackerError`).
+    /// `is_keepalive` marks a warmup heartbeat (sent before the cracker's first
+    /// real status)
     async fn send_progress(
         &self,
         report: ProgressReport,
+        is_keepalive: bool,
     ) -> Result<ProgressCommand, ProgressUpdateError>;
 
     /// Report a cracker error (e.g. a stderr line) without stopping the run.

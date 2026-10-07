@@ -10,6 +10,7 @@ pub mod config;
 pub mod cracker;
 pub mod download;
 pub mod identity;
+pub mod log;
 pub mod model;
 pub mod process;
 pub mod provisioner;

@@ -457,12 +457,14 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
     }
 
     async fn check_client_version(&self, client: &Client<T>) -> Result<(), ProvisionError> {
+        tracing::debug!("checking for client update");
+
         match client
             .check_client_version(agent_version(), agent_type())
             .await?
         {
             CheckClientVersionResponse::UpToDate => {
-                tracing::info!("client version is up to date")
+                tracing::debug!("client version is up to date")
             }
             CheckClientVersionResponse::NewVersion { url } => {
                 tracing::info!(%url, "new client version available; updating");

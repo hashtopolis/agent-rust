@@ -58,6 +58,10 @@ pub struct Cli {
     /// Enable debug logging.
     #[arg(long, short)]
     pub debug: bool,
+
+    /// Enable trace logging, including full request/response bodies.
+    #[arg(long)]
+    pub trace: bool,
 }
 
 impl Cli {

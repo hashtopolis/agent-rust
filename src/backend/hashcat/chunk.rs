@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 
 use crate::cracker::{ChunkOutcome, CrackerError, ProgressCommand, ProgressSink};
+use crate::log;
 use crate::model::{Chunk, Crack, ProgressReport};
 use crate::process::{self, ProcessSpec};
 use crate::sysinfo::CpuSampler;
@@ -125,7 +126,7 @@ pub(super) async fn run<S: ProgressSink>(
             }
 
             _ = keepalive.tick(), if !state.first_status => {
-                let _ = sink.send_progress(state.keepalive_report()).await;
+                let _ = sink.send_progress(state.keepalive_report(), true).await;
             }
         }
     }
@@ -280,6 +281,13 @@ impl ChunkRun {
         let progress = self.progress_from(&status);
         self.last_progress = Some(progress.clone());
 
+        tracing::info!(
+            chunk_id = self.chunk.id,
+            progress = %log::Percent(progress.relative_progress),
+            speed = %log::HashRate(progress.speed),
+            "cracking status"
+        );
+
         // Report progress and cracks first, so a repipe never drops them.
         if let Flow::Stop = self.flush(sink, invocation, &progress).await {
             return Flow::Stop;
@@ -370,7 +378,7 @@ impl ChunkRun {
                 ..Default::default()
             };
 
-            match sink.send_progress(report).await {
+            match sink.send_progress(report, false).await {
                 Ok(ProgressCommand::Continue { zaps }) => {
                     self.pending.drain(..take);
                     write_zaps(&invocation.zaps_dir, &zaps).await;
@@ -419,6 +427,8 @@ fn parse_stdout(line: String) -> Option<Event> {
     let status = HashcatStatus::parse(&line);
 
     if status.is_valid() {
+        tracing::trace!(%line, "hashcat status line");
+
         Some(Event::Status(status))
     } else {
         Some(Event::Debug(line))

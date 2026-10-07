@@ -50,7 +50,7 @@ impl Cracker for FakeCracker {
         _preprocessor: Option<&ResolvedPreprocessor>,
         sink: &S,
     ) -> Result<ChunkOutcome, CrackerError> {
-        let command = sink.send_progress(ProgressReport::default()).await;
+        let command = sink.send_progress(ProgressReport::default(), false).await;
         Ok(ChunkOutcome {
             stopped: matches!(command, Ok(ProgressCommand::Stop)),
         })
