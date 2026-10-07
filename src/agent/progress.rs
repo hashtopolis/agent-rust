@@ -15,43 +15,41 @@ impl<T: Transport> ProgressSink for ClientSink<'_, T> {
     async fn send_progress(
         &self,
         report: ProgressReport,
+        is_keepalive: bool,
     ) -> Result<ProgressCommand, ProgressUpdateError> {
         let new_cracks = report.cracks.len();
+        let keyspace_progress = report.keyspace_progress;
+        let state = report.state;
 
-        tracing::debug!(
-            chunk_id = self.chunk_id,
-            keyspace_progress = report.keyspace_progress,
-            relative_progress = report.relative_progress,
-            speed = report.speed,
-            state = report.state,
-            new_cracks,
-            "reporting progress"
-        );
-
-        let response = self.client.send_progress(report).await;
-
-        match response {
+        match self.client.send_progress(report).await {
             Ok(SendProgressResponse::Continue {
                 zaps,
                 cracked,
                 skipped,
             }) => {
-                if new_cracks > 0 {
-                    tracing::info!(
+                if is_keepalive {
+                    tracing::debug!(
                         chunk_id = self.chunk_id,
+                        keyspace_progress,
+                        state,
                         new_cracks,
                         cracked,
-                        "chunk cracked hashes"
+                        skipped,
+                        zaps = zaps.len(),
+                        "keepalive accepted"
+                    );
+                } else {
+                    tracing::info!(
+                        chunk_id = self.chunk_id,
+                        keyspace_progress,
+                        state,
+                        new_cracks,
+                        cracked,
+                        skipped,
+                        zaps = zaps.len(),
+                        "progress accepted"
                     );
                 }
-
-                tracing::debug!(
-                    chunk_id = self.chunk_id,
-                    cracked,
-                    skipped,
-                    zaps = zaps.len(),
-                    "progress accepted"
-                );
 
                 Ok(ProgressCommand::Continue { zaps })
             }
@@ -69,7 +67,10 @@ impl<T: Transport> ProgressSink for ClientSink<'_, T> {
             // agent marked inactive, token rejected): stop and let the loop
             // re-sync with a fresh task.
             Ok(SendProgressResponse::Rejected { reason }) => {
-                tracing::warn!(?reason, "server rejected progress; stopping chunk");
+                tracing::warn!(
+                    reason = reason.as_deref().unwrap_or("none"),
+                    "server rejected progress; stopping chunk"
+                );
                 Ok(ProgressCommand::Stop)
             }
             // No usable answer (unreachable server, timeout, unparsable reply):

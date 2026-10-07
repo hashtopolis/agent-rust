@@ -10,6 +10,7 @@ use tokio::time::sleep;
 
 use crate::client::ClientError;
 use crate::cracker::Cracker;
+use crate::log;
 use crate::model::{GetChunkResponse, GetTaskResponse, ResolvedPreprocessor, TaskAssignment};
 use crate::provisioner::Provisioner;
 use crate::transport::Transport;
@@ -99,7 +100,10 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                     return Ok(Step::Continue);
                 }
                 Ok(GetTaskResponse::NoTask { reason }) => {
-                    tracing::info!(?reason, "no task available");
+                    tracing::info!(
+                        reason = reason.as_deref().unwrap_or("none"),
+                        "no task available"
+                    );
                     state.invalidate_setup();
 
                     return Ok(Step::Sleep(IDLE_DELAY));
@@ -357,7 +361,7 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             .await
             .map_err(AgentError::client)?;
 
-        tracing::info!(?keyspace, "keyspace accepted");
+        tracing::info!(keyspace = %log::Keyspace(keyspace), "keyspace accepted");
 
         Ok(())
     }
@@ -369,17 +373,19 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
         cracker: &impl Cracker,
         preprocessor: Option<&ResolvedPreprocessor>,
     ) -> Result<Step, AgentError> {
-        tracing::info!("benchmark task");
+        tracing::info!(bench_type = ?task.bench_type, "benchmark started");
 
         match cracker.run_benchmark(task, preprocessor).await {
             Ok(Some(result)) => {
+                tracing::info!(bench_type = ?task.bench_type, result = %result, "benchmark complete");
+
                 match self
                     .client
                     .send_benchmark(task.task_id, task.bench_type, result)
                     .await
                 {
                     Ok(()) => {
-                        tracing::info!("server accepted benchmark");
+                        tracing::debug!("server accepted benchmark");
                         Ok(Step::Continue)
                     }
                     Err(error) if error.is_invalid_token() => Err(AgentError::TokenRejected),

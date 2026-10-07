@@ -58,13 +58,20 @@ impl HttpTransport {
 
 impl Transport for HttpTransport {
     async fn post_json(&self, body: &Value) -> Result<Value, TransportError> {
+        tracing::trace!(url = %self.url, request = %body, "api request");
+
         let response = self.client.post(&self.url).json(body).send().await?;
         let status = response.status();
 
         if !status.is_success() {
+            tracing::trace!(status = status.as_u16(), "api response (error status)");
+
             return Err(TransportError::Status(status.as_u16()));
         }
 
-        Ok(response.json().await?)
+        let value: Value = response.json().await?;
+        tracing::trace!(status = status.as_u16(), response = %value, "api response");
+
+        Ok(value)
     }
 }

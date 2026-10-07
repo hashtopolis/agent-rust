@@ -150,7 +150,11 @@ Common settings also have CLI flags, which win over the config file:
 - `--hashcat-path`
 - per-directory overrides like `--files-path`
 
-`--debug` (`-d`) turns on debug logging, and so does `RUST_LOG`.
+`--debug` (`-d`) turns on debug logging. `--trace` goes one step further and
+also logs full API request and response bodies, including the agent token, so
+keep it to local debugging. Dependencies such as the HTTP stack always log less
+than the agent itself, so they don't drown it out. Setting `RUST_LOG` overrides all of this
+with a standard tracing filter, and an empty `RUST_LOG` logs everything.
 
 ## hashcat compatibility
 

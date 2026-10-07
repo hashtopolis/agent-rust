@@ -1,7 +1,6 @@
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use tracing_subscriber::EnvFilter;
 
 use htp_agent::agent::{Agent, deregister};
 use htp_agent::backend::hashcat::AutoPipePolicy;
@@ -9,6 +8,7 @@ use htp_agent::cli::Cli;
 use htp_agent::client::Client;
 use htp_agent::config::{Config, Settings};
 use htp_agent::download::HttpDownloader;
+use htp_agent::log::Verbosity;
 use htp_agent::provisioner::DiskProvisioner;
 use htp_agent::transport::HttpTransport;
 
@@ -16,7 +16,12 @@ use htp_agent::transport::HttpTransport;
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    init_logging(cli.debug);
+    let verbosity = match (cli.trace, cli.debug) {
+        (true, _) => Verbosity::Trace,
+        (false, true) => Verbosity::Debug,
+        (false, false) => Verbosity::Normal,
+    };
+    htp_agent::log::init(verbosity);
 
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -26,14 +31,6 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-fn init_logging(debug: bool) {
-    let default_level = if debug { "debug" } else { "info" };
-
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| default_level.into()))
-        .init();
 }
 
 async fn run(cli: Cli) -> Result<()> {
