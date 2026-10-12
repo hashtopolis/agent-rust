@@ -1,4 +1,4 @@
-# htp-agent-rust
+# Hashtopolis Agent (Rust)
 
 A Hashtopolis agent written in Rust.
 
