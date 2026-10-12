@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::backend::paths::absolute;
+use crate::backend::paths::resolve_file_token;
 
 use super::HashcatCracker;
 
@@ -8,8 +8,10 @@ impl HashcatCracker {
     /// Split the server's attack string into argv tokens, resolving each: the
     /// hashlist alias becomes `hashlist`, or is dropped entirely when `None` (a
     /// keyspace measure runs without the hashlist). Any token naming a file under
-    /// the files dir becomes that file's absolute path; everything else passes
-    /// through unchanged. No quoting — argv carries spaces natively.
+    /// the files dir becomes that file's absolute path, including a `key=value`
+    /// token whose value names a file (hashcat's `-a 4` PCFG hint files use this
+    /// form); everything else passes through unchanged. No quoting — argv carries
+    /// spaces natively.
     pub(super) fn resolve_attack(
         &self,
         attack: &str,
@@ -27,13 +29,7 @@ impl HashcatCracker {
                 continue;
             }
 
-            let candidate = self.paths.files.join(token);
-
-            if candidate.is_file() {
-                resolved.push(path_arg(&absolute(candidate)));
-            } else {
-                resolved.push(token.to_owned());
-            }
+            resolved.push(resolve_file_token(&self.paths.files, token));
         }
 
         resolved
@@ -131,6 +127,24 @@ mod tests {
         let args = cracker.resolve_attack("-a 0 missing.txt ?d?d", ALIAS, Some(&hashlist));
 
         assert_eq!(args, ["-a", "0", "missing.txt", "?d?d"]);
+    }
+
+    #[test]
+    fn key_value_file_tokens_resolve_to_absolute_paths() {
+        let (dir, cracker) = cracker_with_files(&["hint.hcstat2"]);
+        let hashlist = PathBuf::from("/data/hashlists/1");
+
+        let args =
+            cracker.resolve_attack("#HL# -a 4 hintfile=hint.hcstat2", ALIAS, Some(&hashlist));
+
+        let expected = vec![
+            "/data/hashlists/1".to_owned(),
+            "-a".to_owned(),
+            "4".to_owned(),
+            format!("hintfile={}", seeded(&dir, "hint.hcstat2")),
+        ];
+
+        assert_eq!(args, expected);
     }
 
     #[test]
