@@ -92,7 +92,10 @@ mod tests {
 
         let resolved = resolve_file_token(dir.path(), "hintfile=hint.hcstat2");
 
-        assert_eq!(resolved, format!("hintfile={}", seeded(&dir, "hint.hcstat2")));
+        assert_eq!(
+            resolved,
+            format!("hintfile={}", seeded(&dir, "hint.hcstat2"))
+        );
     }
 
     #[test]

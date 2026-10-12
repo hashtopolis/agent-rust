@@ -134,7 +134,8 @@ mod tests {
         let (dir, cracker) = cracker_with_files(&["hint.hcstat2"]);
         let hashlist = PathBuf::from("/data/hashlists/1");
 
-        let args = cracker.resolve_attack("#HL# -a 4 hintfile=hint.hcstat2", ALIAS, Some(&hashlist));
+        let args =
+            cracker.resolve_attack("#HL# -a 4 hintfile=hint.hcstat2", ALIAS, Some(&hashlist));
 
         let expected = vec![
             "/data/hashlists/1".to_owned(),
