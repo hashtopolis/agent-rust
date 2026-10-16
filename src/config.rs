@@ -2,6 +2,7 @@
 //! user-owned and read once at startup, while `state.json` is agent-owned and
 //! rewritten when the token or uuid change.
 
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -49,7 +50,7 @@ pub enum ConfigError {
     MissingVoucher { path: PathBuf },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Server {
     pub url: Option<String>,
@@ -63,11 +64,38 @@ pub struct Server {
 
 /// Both halves are optional here because the password may come from the
 /// environment instead of the file; `http::HttpSettings` insists on both.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BasicAuthConfig {
     pub user: Option<String>,
     pub password: Option<String>,
+}
+
+// The proxy url may carry credentials, so these two only say whether a
+// secret is set.
+impl fmt::Debug for Server {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Server")
+            .field("url", &self.url)
+            .field("voucher", &self.voucher)
+            .field("client_cert", &self.client_cert)
+            .field("proxy", &redacted(&self.proxy))
+            .field("basic_auth", &self.basic_auth)
+            .finish()
+    }
+}
+
+impl fmt::Debug for BasicAuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BasicAuthConfig")
+            .field("user", &self.user)
+            .field("password", &redacted(&self.password))
+            .finish()
+    }
+}
+
+fn redacted(value: &Option<String>) -> Option<&'static str> {
+    value.as_ref().map(|_| "<redacted>")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,7 +207,9 @@ pub struct State {
 }
 
 /// Never written back; applied once at load so a flag wins over the file.
-#[derive(Debug, Clone, Default)]
+/// No `Debug`: it carries the basic auth password and possibly proxy
+/// credentials.
+#[derive(Clone, Default)]
 pub struct Overrides {
     pub url: Option<String>,
     pub voucher: Option<String>,
@@ -754,5 +784,25 @@ mod tests {
         let config = fixture.load(Overrides::default()).unwrap();
 
         assert_eq!(config.settings().server.basic_auth, None);
+    }
+
+    #[test]
+    fn debug_output_hides_secrets() {
+        let fixture = Fixture::new();
+        fixture.write_settings(r#"{ "server": { "basic_auth": { "user": "agent" } } }"#);
+
+        let config = fixture
+            .load(Overrides {
+                proxy: Some("http://puser:hunter2@proxy:3128".to_string()),
+                auth_password: Some("secret".to_string()),
+                ..Overrides::default()
+            })
+            .unwrap();
+
+        let debug = format!("{config:?}");
+
+        assert!(debug.contains("agent"), "{debug}");
+        assert!(!debug.contains("secret"), "{debug}");
+        assert!(!debug.contains("hunter2"), "{debug}");
     }
 }

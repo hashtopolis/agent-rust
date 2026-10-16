@@ -4,7 +4,8 @@ use clap::Parser;
 
 use crate::config::{DEFAULT_SETTINGS_FILE, DEFAULT_STATE_FILE, Overrides};
 
-#[derive(Debug, Parser)]
+// No `Debug`: `--proxy` may carry credentials.
+#[derive(Parser)]
 #[command(name = "htp-agent", version, about = "Hashtopolis agent (Rust)")]
 pub struct Cli {
     /// User settings file (JSON). Read only; never written by the agent.
