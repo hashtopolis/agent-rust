@@ -37,7 +37,8 @@ async fn run(cli: Cli) -> Result<()> {
     let config = Config::load(&cli.config, &cli.state, cli.overrides())?;
 
     let url = config.require_url()?;
-    let transport = HttpTransport::new(url).context("building the HTTP transport")?;
+    let transport = HttpTransport::new(url, &htp_agent::http::HttpSettings::default())
+        .context("building the HTTP transport")?;
 
     if cli.de_register {
         let Some(token) = config.token() else {
