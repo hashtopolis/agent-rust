@@ -23,9 +23,22 @@ pub struct Cli {
     #[arg(long, env = "HTP_VOUCHER")]
     pub voucher: Option<String>,
 
-    /// Client certificate presented to the server.
+    /// Client certificate for mutual TLS: one PEM file with the certificate
+    /// and its unencrypted private key.
     #[arg(long)]
     pub cert: Option<PathBuf>,
+
+    /// Proxy for all HTTP traffic, e.g. http://proxy:3128. Put proxy
+    /// credentials in the config file or HTP_PROXY: a flag value shows in the
+    /// process list.
+    #[arg(long, env = "HTP_PROXY", hide_env_values = true)]
+    pub proxy: Option<String>,
+
+    /// HTTP basic auth user for the server. The password is read only from
+    /// the HTP_AUTH_PASSWORD environment variable, never from a flag, so it
+    /// stays out of the process list.
+    #[arg(long, env = "HTP_AUTH_USER")]
+    pub auth_user: Option<String>,
 
     /// Register as CPU-only and skip accelerator inventory.
     #[arg(long)]
@@ -74,6 +87,11 @@ impl Cli {
             url: self.url.clone(),
             voucher: self.voucher.clone(),
             cert: self.cert.clone(),
+            proxy: self.proxy.clone(),
+            auth_user: self.auth_user.clone(),
+            auth_password: std::env::var("HTP_AUTH_PASSWORD")
+                .ok()
+                .filter(|password| !password.is_empty()),
             cpu_only: self.cpu_only,
             disable_update: self.disable_update,
             files_path: self.files_path.clone(),

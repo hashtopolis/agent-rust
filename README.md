@@ -94,8 +94,10 @@ A fuller one:
   "server": {
     "url": "https://server.example/api/server.php",
     "voucher": "89GD78tf",
-    "cert": "/etc/htp/client.pem",   // parsed but not supported yet
-    "proxy": "http://proxy:3128"     // parsed but not supported yet
+    "cert": "/etc/htp/client.pem",   // client certificate + key for mutual TLS
+    "proxy": "http://proxy:3128",
+    "auth_user": "agent",
+    "auth_password": "secret"
   },
   "agent": {
     "name": "cruncher"
@@ -147,6 +149,10 @@ Common settings also have CLI flags, which win over the config file:
 - `--cpu-only`
 - `--disable-update`
 - `--cert`
+- `--proxy` (or `HTP_PROXY`)
+- `--auth-user` (or `HTP_AUTH_USER`); the password comes only from the
+  `HTP_AUTH_PASSWORD` environment variable, so it never shows in the process
+  list
 - `--hashcat-path`
 - per-directory overrides like `--files-path`
 
@@ -155,6 +161,33 @@ also logs full API request and response bodies, including the agent token, so
 keep it to local debugging. Dependencies such as the HTTP stack always log less
 than the agent itself, so they don't drown it out. Setting `RUST_LOG` overrides all of this
 with a standard tracing filter, and an empty `RUST_LOG` logs everything.
+
+### Server connection
+
+- **Server certificates** are checked against the operating system's trust
+  store plus a bundled set of public roots. A server signed by an internal CA
+  works once that CA is installed on the host (`update-ca-certificates` on
+  Debian/Ubuntu, the Keychain on macOS, the Windows certificate store). On
+  any platform you can instead point `SSL_CERT_FILE` (or `SSL_CERT_DIR`) at a
+  PEM bundle with the CA; the system store is then skipped, but the bundled
+  public roots stay trusted. Trusting the OS store also means trusting any
+  CA an administrator installed there, including TLS-inspecting corporate
+  proxies.
+- **`server.cert`** is a client certificate for servers that require mutual
+  TLS: one PEM file holding the certificate and its unencrypted private key.
+  It must be an X.509 v3 certificate (older LibreSSL `openssl req -x509`
+  produces v1 certificates, which are rejected). This is not a CA bundle.
+- **`server.proxy`** is one proxy URL for all traffic, credentials included if
+  needed (`http://user:pass@proxy:3128`). Keep credentials in the config file
+  or `HTP_PROXY` rather than `--proxy`, which shows in the process list.
+  `NO_PROXY` is honoured. Without it, the usual `HTTP_PROXY`/`HTTPS_PROXY`/
+  `ALL_PROXY` variables apply. The python agent's per-scheme `proxies` map
+  becomes this single URL.
+- **`server.auth_user` / `server.auth_password`** turn on HTTP basic auth. Set
+  both or neither. The credentials go with every API call and with downloads
+  from the server itself, never to other hosts such as cracker download URLs
+  (the python agent sent them everywhere). Over a plain `http://` server URL
+  they travel unencrypted, and the agent warns at startup.
 
 ## hashcat compatibility
 

@@ -164,6 +164,9 @@ pub struct Overrides {
     pub url: Option<String>,
     pub voucher: Option<String>,
     pub cert: Option<PathBuf>,
+    pub proxy: Option<String>,
+    pub auth_user: Option<String>,
+    pub auth_password: Option<String>,
     pub cpu_only: bool,
     pub disable_update: bool,
     pub files_path: Option<PathBuf>,
@@ -180,12 +183,16 @@ impl Overrides {
             settings.cracker.hashcat_path = Some(hashcat_path.clone());
         }
 
-        if let Some(url) = &self.url {
-            settings.server.url = Some(url.clone());
-        }
-
-        if let Some(voucher) = &self.voucher {
-            settings.server.voucher = Some(voucher.clone());
+        for (target, override_value) in [
+            (&mut settings.server.url, &self.url),
+            (&mut settings.server.voucher, &self.voucher),
+            (&mut settings.server.proxy, &self.proxy),
+            (&mut settings.server.auth_user, &self.auth_user),
+            (&mut settings.server.auth_password, &self.auth_password),
+        ] {
+            if let Some(value) = override_value {
+                *target = Some(value.clone());
+            }
         }
 
         if let Some(cert) = &self.cert {
@@ -606,5 +613,33 @@ mod tests {
         config.remove_state_file().unwrap();
 
         assert!(!fixture.state_path.exists());
+    }
+
+    #[test]
+    fn connection_overrides_win_over_the_file() {
+        let fixture = Fixture::new();
+        fixture.write_settings(
+            r#"{
+                "server": {
+                    "proxy": "http://file-proxy:3128",
+                    "auth_user": "file-user",
+                    "auth_password": "file-password"
+                }
+            }"#,
+        );
+
+        let config = fixture
+            .load(Overrides {
+                proxy: Some("http://cli-proxy:3128".to_string()),
+                auth_user: Some("cli-user".to_string()),
+                auth_password: Some("env-password".to_string()),
+                ..Overrides::default()
+            })
+            .unwrap();
+
+        let server = &config.settings().server;
+        assert_eq!(server.proxy.as_deref(), Some("http://cli-proxy:3128"));
+        assert_eq!(server.auth_user.as_deref(), Some("cli-user"));
+        assert_eq!(server.auth_password.as_deref(), Some("env-password"));
     }
 }

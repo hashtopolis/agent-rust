@@ -121,6 +121,14 @@ impl HttpSettings {
     pub fn auth(&self) -> Option<&BasicAuth> {
         self.auth.as_ref()
     }
+
+    /// Basic auth over plain http puts the password on the wire readable by
+    /// anyone in between. It still works, since TLS may be terminated outside
+    /// the agent, so callers only warn.
+    pub fn sends_credentials_in_clear(&self, server_url: &str) -> bool {
+        self.auth.is_some()
+            && reqwest::Url::parse(server_url).is_ok_and(|url| url.scheme() == "http")
+    }
 }
 
 fn non_empty(value: &Option<String>) -> Option<&str> {
@@ -467,6 +475,24 @@ mod tests {
         assert!(
             head.contains("proxy-authorization: basic chvzzxi6ahvudgvymg=="),
             "{head}"
+        );
+    }
+
+    #[test]
+    fn basic_auth_over_plain_http_is_flagged() {
+        let settings = HttpSettings::from_server(&Server {
+            auth_user: Some("agent".to_string()),
+            auth_password: Some("secret".to_string()),
+            ..server()
+        })
+        .unwrap();
+
+        assert!(settings.sends_credentials_in_clear("http://server.example/api/server.php"));
+        assert!(settings.sends_credentials_in_clear("HTTP://server.example/api/server.php"));
+        assert!(!settings.sends_credentials_in_clear("https://server.example/api/server.php"));
+        assert!(
+            !HttpSettings::default()
+                .sends_credentials_in_clear("http://server.example/api/server.php")
         );
     }
 }
