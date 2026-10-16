@@ -84,28 +84,30 @@ impl HttpDownloader {
         (target.origin() == server.origin()).then_some(auth)
     }
 
-    fn request(&self, url: &str) -> reqwest::RequestBuilder {
-        let request = self.client.get(url);
+    /// Resolves `url` and builds the GET for it, with basic auth only when the
+    /// resolved url is on the server's origin. Returns the resolved url too,
+    /// for error messages.
+    fn request(&self, url: &str) -> (String, reqwest::RequestBuilder) {
+        let url = self.resolve(url);
+        let request = self.client.get(&url);
 
-        match self.auth_for(url) {
+        let request = match self.auth_for(&url) {
             Some(auth) => auth.apply(request),
             None => request,
-        }
+        };
+
+        (url, request)
     }
 }
 
 impl Downloader for HttpDownloader {
     async fn download(&self, url: &str, dest: &Path) -> Result<(), DownloadError> {
-        let url = self.resolve(url);
+        let (url, request) = self.request(url);
 
-        let mut response =
-            self.request(&url)
-                .send()
-                .await
-                .map_err(|source| DownloadError::Http {
-                    url: url.clone(),
-                    source,
-                })?;
+        let mut response = request.send().await.map_err(|source| DownloadError::Http {
+            url: url.clone(),
+            source,
+        })?;
 
         let status = response.status();
 
@@ -195,7 +197,8 @@ mod tests {
     }
 
     fn authorization(d: &HttpDownloader, url: &str) -> Option<String> {
-        let request = d.request(&d.resolve(url)).build().unwrap();
+        let (_, request) = d.request(url);
+        let request = request.build().unwrap();
 
         request
             .headers()
