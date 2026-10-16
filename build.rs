@@ -7,4 +7,9 @@ fn main() {
     // compile-time env var readable via `env!("TARGET_TRIPLE")`.
     let target = env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=TARGET_TRIPLE={target}");
+
+    // Without this, cargo reruns the script (and rebuilds the crate) whenever
+    // any file in the package changes. `TARGET` already invalidates the build
+    // when it changes, so the script itself is the only input to track.
+    println!("cargo:rerun-if-changed=build.rs");
 }

@@ -1,0 +1,2 @@
+tests/fixtures/*.pem -text
+*.sh text eol=lf

@@ -4,7 +4,8 @@ use clap::Parser;
 
 use crate::config::{DEFAULT_SETTINGS_FILE, DEFAULT_STATE_FILE, Overrides};
 
-#[derive(Debug, Parser)]
+// No `Debug`: `--proxy` may carry credentials.
+#[derive(Parser)]
 #[command(name = "htp-agent", version, about = "Hashtopolis agent (Rust)")]
 pub struct Cli {
     /// User settings file (JSON). Read only; never written by the agent.
@@ -23,9 +24,22 @@ pub struct Cli {
     #[arg(long, env = "HTP_VOUCHER")]
     pub voucher: Option<String>,
 
-    /// Client certificate presented to the server.
-    #[arg(long)]
-    pub cert: Option<PathBuf>,
+    /// Client certificate for mutual TLS: one PEM file with the certificate
+    /// and its unencrypted private key.
+    #[arg(long, alias = "cert")]
+    pub client_cert: Option<PathBuf>,
+
+    /// Proxy for all HTTP traffic, e.g. http://proxy:3128. Put proxy
+    /// credentials in the config file or HTP_PROXY: a flag value shows in the
+    /// process list.
+    #[arg(long, env = "HTP_PROXY", hide_env_values = true)]
+    pub proxy: Option<String>,
+
+    /// HTTP basic auth user for the server. The password is read only from
+    /// the HTP_AUTH_PASSWORD environment variable, never from a flag, so it
+    /// stays out of the process list.
+    #[arg(long, env = "HTP_AUTH_USER")]
+    pub auth_user: Option<String>,
 
     /// Register as CPU-only and skip accelerator inventory.
     #[arg(long)]
@@ -73,7 +87,12 @@ impl Cli {
         Overrides {
             url: self.url.clone(),
             voucher: self.voucher.clone(),
-            cert: self.cert.clone(),
+            client_cert: self.client_cert.clone(),
+            proxy: self.proxy.clone(),
+            auth_user: self.auth_user.clone(),
+            auth_password: std::env::var("HTP_AUTH_PASSWORD")
+                .ok()
+                .filter(|password| !password.is_empty()),
             cpu_only: self.cpu_only,
             disable_update: self.disable_update,
             files_path: self.files_path.clone(),
