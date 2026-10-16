@@ -56,6 +56,7 @@ impl TlsServer {
 
             while !received.windows(4).any(|w| w == b"\r\n\r\n") {
                 let n = tls.read(&mut buf).await.map_err(|e| e.to_string())?;
+
                 if n == 0 {
                     return Err("connection closed before the request head ended".to_string());
                 }

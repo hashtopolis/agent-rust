@@ -44,7 +44,8 @@ impl<D: Downloader + ?Sized> Downloader for &D {
 pub struct HttpDownloader {
     client: reqwest::Client,
     base_url: String,
-    auth: Option<BasicAuth>,
+    /// The credentials and the parsed server url whose origin they are for.
+    auth: Option<(BasicAuth, reqwest::Url)>,
 }
 
 impl HttpDownloader {
@@ -59,7 +60,7 @@ impl HttpDownloader {
     /// Basic auth for the server. Sent only to the server's own origin, never
     /// to the absolute cracker and preprocessor urls on other hosts.
     pub fn with_auth(mut self, auth: Option<BasicAuth>) -> Self {
-        self.auth = auth;
+        self.auth = auth.zip(reqwest::Url::parse(&self.base_url).ok());
         self
     }
 
@@ -77,9 +78,8 @@ impl HttpDownloader {
     }
 
     fn auth_for(&self, url: &str) -> Option<&BasicAuth> {
-        let auth = self.auth.as_ref()?;
+        let (auth, server) = self.auth.as_ref()?;
         let target = reqwest::Url::parse(url).ok()?;
-        let server = reqwest::Url::parse(&self.base_url).ok()?;
 
         (target.origin() == server.origin()).then_some(auth)
     }
@@ -165,8 +165,6 @@ mod tests {
     use super::*;
 
     use reqwest::header::AUTHORIZATION;
-
-    use crate::http::BasicAuth;
 
     fn downloader(base_url: &str) -> HttpDownloader {
         HttpDownloader::new(reqwest::Client::new(), base_url)

@@ -3,7 +3,7 @@
 //! every request the agent makes.
 
 use std::error::Error as _;
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -48,14 +48,14 @@ pub struct BasicAuth {
 }
 
 impl BasicAuth {
-    pub fn new(user: impl Into<String>, password: impl Into<String>) -> Self {
+    pub(crate) fn new(user: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
             user: user.into(),
             password: password.into(),
         }
     }
 
-    pub fn apply(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    pub(crate) fn apply(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         request.basic_auth(&self.user, Some(&self.password))
     }
 }
@@ -144,8 +144,7 @@ pub(crate) fn with_causes(error: &reqwest::Error) -> String {
     let mut cause = error.source();
 
     while let Some(current) = cause {
-        message.push_str(": ");
-        message.push_str(&current.to_string());
+        write!(message, ": {current}").expect("writing to a String cannot fail");
         cause = current.source();
     }
 
@@ -213,13 +212,9 @@ mod tests {
             .join(name)
     }
 
-    fn server() -> Server {
-        Server::default()
-    }
-
     #[test]
     fn nothing_configured_yields_no_auth() {
-        let settings = HttpSettings::from_server(&server()).unwrap();
+        let settings = HttpSettings::from_server(&Server::default()).unwrap();
 
         assert!(settings.auth().is_none());
         assert!(settings.client_builder().build().is_ok());
@@ -231,7 +226,7 @@ mod tests {
             client_cert: Some(PathBuf::new()),
             proxy: Some(String::new()),
             basic_auth: Some(BasicAuthConfig::new("", "")),
-            ..server()
+            ..Server::default()
         })
         .unwrap();
 
@@ -251,7 +246,7 @@ mod tests {
                     user: user.map(str::to_string),
                     password: password.map(str::to_string),
                 }),
-                ..server()
+                ..Server::default()
             });
 
             assert!(
@@ -265,7 +260,7 @@ mod tests {
     fn user_and_password_become_basic_auth() {
         let settings = HttpSettings::from_server(&Server {
             basic_auth: Some(BasicAuthConfig::new("agent", "secret")),
-            ..server()
+            ..Server::default()
         })
         .unwrap();
 
@@ -277,7 +272,7 @@ mod tests {
         let settings = HttpSettings::from_server(&Server {
             basic_auth: Some(BasicAuthConfig::new("agent", "secret")),
             proxy: Some("http://puser:hunter2@proxy.example:3128".to_string()),
-            ..server()
+            ..Server::default()
         })
         .unwrap();
 
@@ -295,7 +290,7 @@ mod tests {
 
         let error = HttpSettings::from_server(&Server {
             client_cert: Some(path.clone()),
-            ..server()
+            ..Server::default()
         })
         .unwrap_err();
 
@@ -317,7 +312,7 @@ mod tests {
 
         let error = HttpSettings::from_server(&Server {
             client_cert: Some(path.clone()),
-            ..server()
+            ..Server::default()
         })
         .unwrap_err();
 
@@ -334,7 +329,7 @@ mod tests {
 
         let error = HttpSettings::from_server(&Server {
             client_cert: Some(path.clone()),
-            ..server()
+            ..Server::default()
         })
         .unwrap_err();
 
@@ -349,7 +344,7 @@ mod tests {
     fn valid_identity_is_accepted() {
         let settings = HttpSettings::from_server(&Server {
             client_cert: Some(fixture("client-identity.pem")),
-            ..server()
+            ..Server::default()
         })
         .unwrap();
 
@@ -364,7 +359,7 @@ mod tests {
     fn invalid_proxy_error_does_not_echo_the_url() {
         let error = HttpSettings::from_server(&Server {
             proxy: Some("http://puser:hunter2@[::1".to_string()),
-            ..server()
+            ..Server::default()
         })
         .unwrap_err();
 
@@ -379,7 +374,7 @@ mod tests {
     fn basic_auth_over_plain_http_is_flagged() {
         let settings = HttpSettings::from_server(&Server {
             basic_auth: Some(BasicAuthConfig::new("agent", "secret")),
-            ..server()
+            ..Server::default()
         })
         .unwrap();
 

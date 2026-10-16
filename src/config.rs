@@ -99,6 +99,16 @@ fn redacted(value: &Option<String>) -> Option<&'static str> {
     value.as_ref().map(|_| "<redacted>")
 }
 
+#[cfg(test)]
+impl BasicAuthConfig {
+    pub(crate) fn new(user: &str, password: &str) -> Self {
+        Self {
+            user: Some(user.to_string()),
+            password: Some(password.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentInfo {
@@ -156,16 +166,6 @@ impl Default for Behavior {
             multicast_device: "eth0".to_string(),
             file_deletion_disable: false,
             file_deletion_interval: 600,
-        }
-    }
-}
-
-#[cfg(test)]
-impl BasicAuthConfig {
-    pub(crate) fn new(user: &str, password: &str) -> Self {
-        Self {
-            user: Some(user.to_string()),
-            password: Some(password.to_string()),
         }
     }
 }
@@ -229,18 +229,18 @@ pub struct Overrides {
 }
 
 impl Overrides {
-    fn apply(&self, settings: &mut Settings) {
-        if let Some(hashcat_path) = &self.hashcat_path {
-            settings.cracker.hashcat_path = Some(hashcat_path.clone());
+    fn apply(self, settings: &mut Settings) {
+        if self.hashcat_path.is_some() {
+            settings.cracker.hashcat_path = self.hashcat_path;
         }
 
         for (target, override_value) in [
-            (&mut settings.server.url, &self.url),
-            (&mut settings.server.voucher, &self.voucher),
-            (&mut settings.server.proxy, &self.proxy),
+            (&mut settings.server.url, self.url),
+            (&mut settings.server.voucher, self.voucher),
+            (&mut settings.server.proxy, self.proxy),
         ] {
-            if let Some(value) = override_value {
-                *target = Some(value.clone());
+            if override_value.is_some() {
+                *target = override_value;
             }
         }
 
@@ -251,17 +251,17 @@ impl Overrides {
                 .get_or_insert_with(BasicAuthConfig::default);
 
             for (target, override_value) in [
-                (&mut auth.user, &self.auth_user),
-                (&mut auth.password, &self.auth_password),
+                (&mut auth.user, self.auth_user),
+                (&mut auth.password, self.auth_password),
             ] {
-                if let Some(value) = override_value {
-                    *target = Some(value.clone());
+                if override_value.is_some() {
+                    *target = override_value;
                 }
             }
         }
 
-        if let Some(client_cert) = &self.client_cert {
-            settings.server.client_cert = Some(client_cert.clone());
+        if self.client_cert.is_some() {
+            settings.server.client_cert = self.client_cert;
         }
 
         if self.cpu_only {
@@ -273,14 +273,14 @@ impl Overrides {
         }
 
         for (target, override_value) in [
-            (&mut settings.paths.files, &self.files_path),
-            (&mut settings.paths.crackers, &self.crackers_path),
-            (&mut settings.paths.hashlists, &self.hashlists_path),
-            (&mut settings.paths.preprocessors, &self.preprocessors_path),
-            (&mut settings.paths.zaps, &self.zaps_path),
+            (&mut settings.paths.files, self.files_path),
+            (&mut settings.paths.crackers, self.crackers_path),
+            (&mut settings.paths.hashlists, self.hashlists_path),
+            (&mut settings.paths.preprocessors, self.preprocessors_path),
+            (&mut settings.paths.zaps, self.zaps_path),
         ] {
             if let Some(path) = override_value {
-                *target = path.clone();
+                *target = path;
             }
         }
     }
