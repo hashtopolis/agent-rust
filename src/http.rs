@@ -2,6 +2,7 @@
 //! server connection settings (client certificate, proxy, basic auth) apply to
 //! every request the agent makes.
 
+use std::error::Error as _;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -135,6 +136,22 @@ impl HttpSettings {
     }
 }
 
+/// reqwest's own message stops at "error sending request for url (...)"; the
+/// actual cause (refused connection, untrusted certificate, TLS alert) is in
+/// its source chain, so spell that out for log lines.
+pub(crate) fn with_causes(error: &reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut cause = error.source();
+
+    while let Some(current) = cause {
+        message.push_str(": ");
+        message.push_str(&current.to_string());
+        cause = current.source();
+    }
+
+    message
+}
+
 fn non_empty(value: &Option<String>) -> Option<&str> {
     value.as_deref().filter(|value| !value.is_empty())
 }
@@ -220,6 +237,15 @@ pub(crate) mod test_server {
         pub(crate) async fn request_head(self) -> String {
             self.handle.await.unwrap().to_lowercase()
         }
+    }
+
+    /// A url on 127.0.0.1 where nothing listens, so connecting fails fast.
+    pub(crate) async fn closed_url() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api/server.php", listener.local_addr().unwrap());
+        drop(listener);
+
+        url
     }
 
     /// Reads the head and drains a `content-length` body, so closing the

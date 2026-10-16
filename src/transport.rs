@@ -21,7 +21,7 @@ impl<T: Transport + ?Sized> Transport for &T {
 
 #[derive(Debug, Error)]
 pub enum TransportError {
-    #[error("http error: {0}")]
+    #[error("http error: {}", crate::http::with_causes(.0))]
     Http(#[from] reqwest::Error),
     #[error("unexpected status code from server: {0}")]
     Status(u16),
@@ -82,7 +82,7 @@ mod tests {
     use serde_json::json;
 
     use crate::config::{BasicAuthConfig, Server};
-    use crate::http::test_server::OneShot;
+    use crate::http::test_server::{self, OneShot};
 
     const OK_RESPONSE: &str = r#"{"action":"testConnection","response":"SUCCESS"}"#;
 
@@ -140,5 +140,15 @@ mod tests {
 
         assert!(!debug.contains("secret"), "{debug}");
         assert!(!debug.contains("hunter2"), "{debug}");
+    }
+
+    #[tokio::test]
+    async fn connection_failures_name_the_cause() {
+        let url = test_server::closed_url().await;
+        let transport = HttpTransport::new(url, &HttpSettings::default()).unwrap();
+
+        let error = transport.post_json(&json!({})).await.unwrap_err();
+
+        assert!(error.to_string().contains("tcp connect error"), "{error}");
     }
 }

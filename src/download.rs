@@ -12,7 +12,7 @@ use crate::http::BasicAuth;
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
-    #[error("http error for {url}: {source}")]
+    #[error("http error for {url}: {}", crate::http::with_causes(.source))]
     Http {
         url: String,
         #[source]
@@ -155,7 +155,7 @@ mod tests {
     use super::*;
 
     use crate::http::BasicAuth;
-    use crate::http::test_server::OneShot;
+    use crate::http::test_server::{self, OneShot};
 
     use tempfile::TempDir;
 
@@ -251,5 +251,18 @@ mod tests {
             !elsewhere_head.contains("authorization"),
             "{elsewhere_head}"
         );
+    }
+
+    #[tokio::test]
+    async fn connection_failures_name_the_cause() {
+        let dir = TempDir::new().unwrap();
+        let d = downloader(&test_server::closed_url().await);
+
+        let error = d
+            .download("getFile/1/words.txt", &dir.path().join("words.txt"))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("tcp connect error"), "{error}");
     }
 }
