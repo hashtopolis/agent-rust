@@ -94,10 +94,9 @@ A fuller one:
   "server": {
     "url": "https://server.example/api/server.php",
     "voucher": "89GD78tf",
-    "cert": "/etc/htp/client.pem",   // client certificate + key for mutual TLS
+    "client_cert": "/etc/htp/client.pem",   // certificate + key for mutual TLS
     "proxy": "http://proxy:3128",
-    "auth_user": "agent",
-    "auth_password": "secret"
+    "basic_auth": { "user": "agent", "password": "secret" }
   },
   "agent": {
     "name": "cruncher"
@@ -148,7 +147,7 @@ Common settings also have CLI flags, which win over the config file:
 
 - `--cpu-only`
 - `--disable-update`
-- `--cert`
+- `--client-cert` (`--cert` also works, as in the python agent)
 - `--proxy` (or `HTP_PROXY`)
 - `--auth-user` (or `HTP_AUTH_USER`); the password comes only from the
   `HTP_AUTH_PASSWORD` environment variable, so it never shows in the process
@@ -173,7 +172,7 @@ with a standard tracing filter, and an empty `RUST_LOG` logs everything.
   public roots stay trusted. Trusting the OS store also means trusting any
   CA an administrator installed there, including TLS-inspecting corporate
   proxies.
-- **`server.cert`** is a client certificate for servers that require mutual
+- **`server.client_cert`** is a client certificate for servers that require mutual
   TLS: one PEM file holding the certificate and its unencrypted private key.
   It must be an X.509 v3 certificate (older LibreSSL `openssl req -x509`
   produces v1 certificates, which are rejected). This is not a CA bundle.
@@ -183,11 +182,13 @@ with a standard tracing filter, and an empty `RUST_LOG` logs everything.
   `NO_PROXY` is honoured. Without it, the usual `HTTP_PROXY`/`HTTPS_PROXY`/
   `ALL_PROXY` variables apply. The python agent's per-scheme `proxies` map
   becomes this single URL.
-- **`server.auth_user` / `server.auth_password`** turn on HTTP basic auth. Set
-  both or neither. The credentials go with every API call and with downloads
-  from the server itself, never to other hosts such as cracker download URLs
-  (the python agent sent them everywhere). Over a plain `http://` server URL
-  they travel unencrypted, and the agent warns at startup.
+- **`server.basic_auth`** (`{ "user": ..., "password": ... }`) turns on HTTP
+  basic auth. Both are needed; the password may instead come from
+  `HTP_AUTH_PASSWORD`, so it can stay out of the file. The credentials go
+  with every API call and with downloads from the server itself, never to
+  other hosts such as cracker download URLs (the python agent sent them
+  everywhere). Over a plain `http://` server URL they travel unencrypted, and
+  the agent warns at startup.
 
 ## hashcat compatibility
 

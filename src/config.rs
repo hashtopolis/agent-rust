@@ -54,10 +54,20 @@ pub enum ConfigError {
 pub struct Server {
     pub url: Option<String>,
     pub voucher: Option<String>,
-    pub cert: Option<PathBuf>,
-    pub auth_user: Option<String>,
-    pub auth_password: Option<String>,
+    /// Client certificate and key (one PEM file) for servers that require
+    /// mutual TLS. Not a CA bundle.
+    pub client_cert: Option<PathBuf>,
     pub proxy: Option<String>,
+    pub basic_auth: Option<BasicAuthConfig>,
+}
+
+/// Both halves are optional here because the password may come from the
+/// environment instead of the file; `http::HttpSettings` insists on both.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BasicAuthConfig {
+    pub user: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +131,16 @@ impl Default for Behavior {
     }
 }
 
+#[cfg(test)]
+impl BasicAuthConfig {
+    pub(crate) fn new(user: &str, password: &str) -> Self {
+        Self {
+            user: Some(user.to_string()),
+            password: Some(password.to_string()),
+        }
+    }
+}
+
 impl Behavior {
     pub fn file_deletion_interval(&self) -> Duration {
         Duration::from_secs(self.file_deletion_interval)
@@ -163,7 +183,7 @@ pub struct State {
 pub struct Overrides {
     pub url: Option<String>,
     pub voucher: Option<String>,
-    pub cert: Option<PathBuf>,
+    pub client_cert: Option<PathBuf>,
     pub proxy: Option<String>,
     pub auth_user: Option<String>,
     pub auth_password: Option<String>,
@@ -187,16 +207,30 @@ impl Overrides {
             (&mut settings.server.url, &self.url),
             (&mut settings.server.voucher, &self.voucher),
             (&mut settings.server.proxy, &self.proxy),
-            (&mut settings.server.auth_user, &self.auth_user),
-            (&mut settings.server.auth_password, &self.auth_password),
         ] {
             if let Some(value) = override_value {
                 *target = Some(value.clone());
             }
         }
 
-        if let Some(cert) = &self.cert {
-            settings.server.cert = Some(cert.clone());
+        if self.auth_user.is_some() || self.auth_password.is_some() {
+            let auth = settings
+                .server
+                .basic_auth
+                .get_or_insert_with(BasicAuthConfig::default);
+
+            for (target, override_value) in [
+                (&mut auth.user, &self.auth_user),
+                (&mut auth.password, &self.auth_password),
+            ] {
+                if let Some(value) = override_value {
+                    *target = Some(value.clone());
+                }
+            }
+        }
+
+        if let Some(client_cert) = &self.client_cert {
+            settings.server.client_cert = Some(client_cert.clone());
         }
 
         if self.cpu_only {
@@ -436,10 +470,9 @@ mod tests {
             server: Server {
                 url: Some("https://example.com/api/server.php".to_string()),
                 voucher: Some("89GD78tf".to_string()),
-                cert: Some(PathBuf::from("/etc/htp/client.pem")),
-                auth_user: Some("agent".to_string()),
-                auth_password: Some("secret".to_string()),
+                client_cert: Some(PathBuf::from("/etc/htp/client.pem")),
                 proxy: Some("http://proxy:3128".to_string()),
+                basic_auth: Some(BasicAuthConfig::new("agent", "secret")),
             },
             agent: AgentInfo {
                 name: Some("cruncher".to_string()),
@@ -616,20 +649,67 @@ mod tests {
     }
 
     #[test]
+    fn connection_settings_are_read_from_the_server_section() {
+        let fixture = Fixture::new();
+        fixture.write_settings(
+            r#"{
+                "server": {
+                    "client_cert": "/etc/htp/client.pem",
+                    "proxy": "http://proxy:3128",
+                    "basic_auth": { "user": "agent", "password": "secret" }
+                }
+            }"#,
+        );
+
+        let config = fixture.load(Overrides::default()).unwrap();
+
+        let server = &config.settings().server;
+        assert_eq!(
+            server.client_cert.as_deref(),
+            Some(Path::new("/etc/htp/client.pem"))
+        );
+        assert_eq!(server.proxy.as_deref(), Some("http://proxy:3128"));
+        assert_eq!(
+            server.basic_auth,
+            Some(BasicAuthConfig::new("agent", "secret"))
+        );
+    }
+
+    #[test]
+    fn the_old_flat_connection_keys_are_rejected() {
+        for old_key in [
+            r#"{ "server": { "cert": "/etc/htp/client.pem" } }"#,
+            r#"{ "server": { "auth_user": "agent" } }"#,
+            r#"{ "server": { "basic_auth": { "username": "agent" } } }"#,
+        ] {
+            let fixture = Fixture::new();
+            fixture.write_settings(old_key);
+
+            let error = fixture.load(Overrides::default()).unwrap_err();
+
+            assert!(
+                matches!(error, ConfigError::Json { .. }),
+                "{old_key}: expected a JSON error, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
     fn connection_overrides_win_over_the_file() {
         let fixture = Fixture::new();
         fixture.write_settings(
             r#"{
                 "server": {
+                    "client_cert": "/from/file.pem",
                     "proxy": "http://file-proxy:3128",
-                    "auth_user": "file-user",
-                    "auth_password": "file-password"
+                    "basic_auth": { "user": "file-user", "password": "file-password" }
                 }
             }"#,
         );
 
         let config = fixture
             .load(Overrides {
+                client_cert: Some(PathBuf::from("/from/cli.pem")),
                 proxy: Some("http://cli-proxy:3128".to_string()),
                 auth_user: Some("cli-user".to_string()),
                 auth_password: Some("env-password".to_string()),
@@ -638,8 +718,41 @@ mod tests {
             .unwrap();
 
         let server = &config.settings().server;
+        assert_eq!(
+            server.client_cert.as_deref(),
+            Some(Path::new("/from/cli.pem"))
+        );
         assert_eq!(server.proxy.as_deref(), Some("http://cli-proxy:3128"));
-        assert_eq!(server.auth_user.as_deref(), Some("cli-user"));
-        assert_eq!(server.auth_password.as_deref(), Some("env-password"));
+        assert_eq!(
+            server.basic_auth,
+            Some(BasicAuthConfig::new("cli-user", "env-password"))
+        );
+    }
+
+    #[test]
+    fn the_password_can_come_from_the_environment_alone() {
+        let fixture = Fixture::new();
+        fixture.write_settings(r#"{ "server": { "basic_auth": { "user": "agent" } } }"#);
+
+        let config = fixture
+            .load(Overrides {
+                auth_password: Some("env-password".to_string()),
+                ..Overrides::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            config.settings().server.basic_auth,
+            Some(BasicAuthConfig::new("agent", "env-password"))
+        );
+    }
+
+    #[test]
+    fn no_auth_anywhere_leaves_basic_auth_unset() {
+        let fixture = Fixture::new();
+
+        let config = fixture.load(Overrides::default()).unwrap();
+
+        assert_eq!(config.settings().server.basic_auth, None);
     }
 }

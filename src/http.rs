@@ -34,7 +34,9 @@ pub enum HttpError {
         #[source]
         source: reqwest::Error,
     },
-    #[error("server.auth_user and server.auth_password must be set together")]
+    #[error(
+        "server.basic_auth needs both user and password (the password may also come from HTP_AUTH_PASSWORD)"
+    )]
     PartialAuth,
 }
 
@@ -78,7 +80,7 @@ pub struct HttpSettings {
 impl HttpSettings {
     pub fn from_server(server: &Server) -> Result<Self, HttpError> {
         let identity = server
-            .cert
+            .client_cert
             .as_deref()
             .filter(|path| !path.as_os_str().is_empty())
             .map(read_identity)
@@ -86,10 +88,12 @@ impl HttpSettings {
 
         let proxy = non_empty(&server.proxy).map(read_proxy).transpose()?;
 
-        let auth = match (
-            non_empty(&server.auth_user),
-            non_empty(&server.auth_password),
-        ) {
+        let (user, password) = match &server.basic_auth {
+            Some(auth) => (non_empty(&auth.user), non_empty(&auth.password)),
+            None => (None, None),
+        };
+
+        let auth = match (user, password) {
             (Some(user), Some(password)) => Some(BasicAuth::new(user, password)),
             (None, None) => None,
             _ => return Err(HttpError::PartialAuth),
@@ -259,6 +263,8 @@ mod tests {
     use super::test_server::OneShot;
     use super::*;
 
+    use crate::config::BasicAuthConfig;
+
     use tempfile::TempDir;
 
     fn fixture(name: &str) -> PathBuf {
@@ -283,10 +289,9 @@ mod tests {
     #[test]
     fn empty_strings_count_as_unset() {
         let settings = HttpSettings::from_server(&Server {
-            cert: Some(PathBuf::new()),
+            client_cert: Some(PathBuf::new()),
             proxy: Some(String::new()),
-            auth_user: Some(String::new()),
-            auth_password: Some(String::new()),
+            basic_auth: Some(BasicAuthConfig::new("", "")),
             ..server()
         })
         .unwrap();
@@ -303,8 +308,10 @@ mod tests {
             (Some("agent"), Some("")),
         ] {
             let result = HttpSettings::from_server(&Server {
-                auth_user: user.map(str::to_string),
-                auth_password: password.map(str::to_string),
+                basic_auth: Some(BasicAuthConfig {
+                    user: user.map(str::to_string),
+                    password: password.map(str::to_string),
+                }),
                 ..server()
             });
 
@@ -318,8 +325,7 @@ mod tests {
     #[test]
     fn user_and_password_become_basic_auth() {
         let settings = HttpSettings::from_server(&Server {
-            auth_user: Some("agent".to_string()),
-            auth_password: Some("secret".to_string()),
+            basic_auth: Some(BasicAuthConfig::new("agent", "secret")),
             ..server()
         })
         .unwrap();
@@ -330,8 +336,7 @@ mod tests {
     #[test]
     fn debug_output_hides_secrets() {
         let settings = HttpSettings::from_server(&Server {
-            auth_user: Some("agent".to_string()),
-            auth_password: Some("secret".to_string()),
+            basic_auth: Some(BasicAuthConfig::new("agent", "secret")),
             proxy: Some("http://puser:hunter2@proxy.example:3128".to_string()),
             ..server()
         })
@@ -350,7 +355,7 @@ mod tests {
         let path = dir.path().join("missing.pem");
 
         let error = HttpSettings::from_server(&Server {
-            cert: Some(path.clone()),
+            client_cert: Some(path.clone()),
             ..server()
         })
         .unwrap_err();
@@ -372,7 +377,7 @@ mod tests {
         fs::write(&path, &identity[..cert_end]).unwrap();
 
         let error = HttpSettings::from_server(&Server {
-            cert: Some(path.clone()),
+            client_cert: Some(path.clone()),
             ..server()
         })
         .unwrap_err();
@@ -389,7 +394,7 @@ mod tests {
         let path = fixture("client-v1.pem");
 
         let error = HttpSettings::from_server(&Server {
-            cert: Some(path.clone()),
+            client_cert: Some(path.clone()),
             ..server()
         })
         .unwrap_err();
@@ -404,7 +409,7 @@ mod tests {
     #[test]
     fn valid_identity_is_accepted() {
         let settings = HttpSettings::from_server(&Server {
-            cert: Some(fixture("client-identity.pem")),
+            client_cert: Some(fixture("client-identity.pem")),
             ..server()
         })
         .unwrap();
@@ -481,8 +486,7 @@ mod tests {
     #[test]
     fn basic_auth_over_plain_http_is_flagged() {
         let settings = HttpSettings::from_server(&Server {
-            auth_user: Some("agent".to_string()),
-            auth_password: Some("secret".to_string()),
+            basic_auth: Some(BasicAuthConfig::new("agent", "secret")),
             ..server()
         })
         .unwrap();

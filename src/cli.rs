@@ -25,8 +25,8 @@ pub struct Cli {
 
     /// Client certificate for mutual TLS: one PEM file with the certificate
     /// and its unencrypted private key.
-    #[arg(long)]
-    pub cert: Option<PathBuf>,
+    #[arg(long, alias = "cert")]
+    pub client_cert: Option<PathBuf>,
 
     /// Proxy for all HTTP traffic, e.g. http://proxy:3128. Put proxy
     /// credentials in the config file or HTP_PROXY: a flag value shows in the
@@ -86,7 +86,7 @@ impl Cli {
         Overrides {
             url: self.url.clone(),
             voucher: self.voucher.clone(),
-            cert: self.cert.clone(),
+            client_cert: self.client_cert.clone(),
             proxy: self.proxy.clone(),
             auth_user: self.auth_user.clone(),
             auth_password: std::env::var("HTP_AUTH_PASSWORD")

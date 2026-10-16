@@ -25,7 +25,7 @@ fn client(settings: &HttpSettings) -> reqwest::Client {
 async fn the_configured_client_certificate_is_presented() {
     let server = TlsServer::start(ClientAuth::Required).await;
     let settings = HttpSettings::from_server(&Server {
-        cert: Some(fixture("client-identity.pem")),
+        client_cert: Some(fixture("client-identity.pem")),
         ..Server::default()
     })
     .unwrap();

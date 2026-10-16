@@ -81,7 +81,7 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::config::Server;
+    use crate::config::{BasicAuthConfig, Server};
     use crate::http::test_server::OneShot;
 
     const OK_RESPONSE: &str = r#"{"action":"testConnection","response":"SUCCESS"}"#;
@@ -100,8 +100,7 @@ mod tests {
     async fn api_requests_carry_basic_auth() {
         let server = OneShot::start(OK_RESPONSE).await;
         let settings = HttpSettings::from_server(&Server {
-            auth_user: Some("agent".to_string()),
-            auth_password: Some("secret".to_string()),
+            basic_auth: Some(BasicAuthConfig::new("agent", "secret")),
             ..Server::default()
         })
         .unwrap();
@@ -129,8 +128,7 @@ mod tests {
     #[test]
     fn debug_output_hides_secrets() {
         let settings = HttpSettings::from_server(&Server {
-            auth_user: Some("agent".to_string()),
-            auth_password: Some("secret".to_string()),
+            basic_auth: Some(BasicAuthConfig::new("agent", "secret")),
             proxy: Some("http://puser:hunter2@proxy.example:3128".to_string()),
             ..Server::default()
         })
