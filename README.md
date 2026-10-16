@@ -172,8 +172,9 @@ with a standard tracing filter, and an empty `RUST_LOG` logs everything.
   public roots stay trusted. Trusting the OS store also means trusting any
   CA an administrator installed there, including TLS-inspecting corporate
   proxies.
-- **`server.client_cert`** is a client certificate for servers that require mutual
-  TLS: one PEM file holding the certificate and its unencrypted private key.
+- **`server.client_cert`** (formerly `cert`, which still works) is a client
+  certificate for servers that require mutual TLS: one PEM file holding the
+  certificate and its unencrypted private key.
   It must be an X.509 v3 certificate (older LibreSSL `openssl req -x509`
   produces v1 certificates, which are rejected). This is not a CA bundle.
 - **`server.proxy`** is one proxy URL for all traffic, credentials included if

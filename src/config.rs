@@ -56,7 +56,8 @@ pub struct Server {
     pub url: Option<String>,
     pub voucher: Option<String>,
     /// Client certificate and key (one PEM file) for servers that require
-    /// mutual TLS. Not a CA bundle.
+    /// mutual TLS. Not a CA bundle. `cert` is the earlier name of this key.
+    #[serde(alias = "cert")]
     pub client_cert: Option<PathBuf>,
     pub proxy: Option<String>,
     pub basic_auth: Option<BasicAuthConfig>,
@@ -708,7 +709,6 @@ mod tests {
     #[test]
     fn the_old_flat_connection_keys_are_rejected() {
         for old_key in [
-            r#"{ "server": { "cert": "/etc/htp/client.pem" } }"#,
             r#"{ "server": { "auth_user": "agent" } }"#,
             r#"{ "server": { "basic_auth": { "username": "agent" } } }"#,
         ] {
@@ -722,6 +722,19 @@ mod tests {
                 "{old_key}: expected a JSON error, got {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_old_cert_key_still_names_the_client_certificate() {
+        let fixture = Fixture::new();
+        fixture.write_settings(r#"{ "server": { "cert": "/etc/htp/client.pem" } }"#);
+
+        let config = fixture.load(Overrides::default()).unwrap();
+
+        assert_eq!(
+            config.settings().server.client_cert.as_deref(),
+            Some(Path::new("/etc/htp/client.pem"))
+        );
     }
 
     #[test]
