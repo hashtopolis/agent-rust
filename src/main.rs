@@ -39,6 +39,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     let url = config.require_url()?;
     let http = HttpSettings::from_server(&config.settings().server)?;
+
     if http.sends_credentials_in_clear(url) {
         tracing::warn!("server.url is plain http: basic auth credentials are sent unencrypted");
     }
