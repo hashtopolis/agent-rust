@@ -58,12 +58,14 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     // No timeout here: downloads may stream for many minutes.
-    let download_client = http
-        .client_builder()
-        .build()
-        .context("building the download client")?;
-    let downloader =
-        HttpDownloader::new(download_client, transport.url()).with_auth(http.auth().cloned());
+    let downloader = {
+        let client = http
+            .client_builder()
+            .build()
+            .context("building the download client")?;
+
+        HttpDownloader::new(client, transport.url()).with_auth(http.auth().cloned())
+    };
 
     let provisioner = {
         let settings = config.settings();
