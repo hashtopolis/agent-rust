@@ -1,6 +1,6 @@
 use htp_agent::http::HttpSettings;
 
-use crate::server::{ClientAuth, TlsServer};
+use crate::support::tls_server::{ClientAuth, TlsServer};
 
 // Gated on HTP_TRUST_STORE_TEST: the flag is a promise that the test CA from
 // tests/fixtures is trusted, either through the OS store (CI installs it) or

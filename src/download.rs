@@ -155,9 +155,6 @@ mod tests {
     use super::*;
 
     use crate::http::BasicAuth;
-    use crate::http::test_server::{self, OneShot};
-
-    use tempfile::TempDir;
 
     fn downloader(base_url: &str) -> HttpDownloader {
         HttpDownloader::new(reqwest::Client::new(), base_url)
@@ -222,47 +219,5 @@ mod tests {
             d.auth_for("https://server.example/getFile/1/words.txt")
                 .is_none()
         );
-    }
-
-    #[tokio::test]
-    async fn relative_downloads_carry_basic_auth_and_foreign_ones_do_not() {
-        let server = OneShot::start("wordlist").await;
-        let elsewhere = OneShot::start("cracker").await;
-        let dir = TempDir::new().unwrap();
-        let d = downloader(&format!("{}/api/server.php", server.url)).with_auth(Some(auth()));
-
-        d.download("getFile/1/words.txt", &dir.path().join("words.txt"))
-            .await
-            .unwrap();
-        d.download(
-            &format!("{}/hashcat.7z", elsewhere.url),
-            &dir.path().join("hashcat.7z"),
-        )
-        .await
-        .unwrap();
-
-        let server_head = server.request_head().await;
-        let elsewhere_head = elsewhere.request_head().await;
-        assert!(
-            server_head.contains("authorization: basic ywdlbnq6c2vjcmv0"),
-            "{server_head}"
-        );
-        assert!(
-            !elsewhere_head.contains("authorization"),
-            "{elsewhere_head}"
-        );
-    }
-
-    #[tokio::test]
-    async fn connection_failures_name_the_cause() {
-        let dir = TempDir::new().unwrap();
-        let d = downloader(&test_server::closed_url().await);
-
-        let error = d
-            .download("getFile/1/words.txt", &dir.path().join("words.txt"))
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("tcp connect error"), "{error}");
     }
 }

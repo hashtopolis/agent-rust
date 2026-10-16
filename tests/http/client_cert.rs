@@ -1,16 +1,8 @@
-use std::path::PathBuf;
-
 use htp_agent::config::Server;
 use htp_agent::http::HttpSettings;
 
-use crate::server::{ClientAuth, TEST_CA, TlsServer};
-
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
+use crate::support::fixture;
+use crate::support::tls_server::{ClientAuth, TEST_CA, TlsServer};
 
 /// Trusts the test CA directly, so these tests do not depend on the OS store.
 fn client(settings: &HttpSettings) -> reqwest::Client {

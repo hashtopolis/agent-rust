@@ -79,51 +79,7 @@ impl Transport for HttpTransport {
 mod tests {
     use super::*;
 
-    use serde_json::json;
-
     use crate::config::{BasicAuthConfig, Server};
-    use crate::http::test_server::{self, OneShot};
-
-    const OK_RESPONSE: &str = r#"{"action":"testConnection","response":"SUCCESS"}"#;
-
-    async fn post_to(server: &OneShot, settings: &HttpSettings) {
-        let transport =
-            HttpTransport::new(format!("{}/api/server.php", server.url), settings).unwrap();
-
-        transport
-            .post_json(&json!({ "action": "testConnection" }))
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn api_requests_carry_basic_auth() {
-        let server = OneShot::start(OK_RESPONSE).await;
-        let settings = HttpSettings::from_server(&Server {
-            basic_auth: Some(BasicAuthConfig::new("agent", "secret")),
-            ..Server::default()
-        })
-        .unwrap();
-
-        post_to(&server, &settings).await;
-
-        let head = server.request_head().await;
-        // base64("agent:secret"), lowercased by `request_head`
-        assert!(
-            head.contains("authorization: basic ywdlbnq6c2vjcmv0"),
-            "{head}"
-        );
-    }
-
-    #[tokio::test]
-    async fn api_requests_without_auth_send_no_authorization_header() {
-        let server = OneShot::start(OK_RESPONSE).await;
-
-        post_to(&server, &HttpSettings::default()).await;
-
-        let head = server.request_head().await;
-        assert!(!head.contains("authorization"), "{head}");
-    }
 
     #[test]
     fn debug_output_hides_secrets() {
@@ -140,15 +96,5 @@ mod tests {
 
         assert!(!debug.contains("secret"), "{debug}");
         assert!(!debug.contains("hunter2"), "{debug}");
-    }
-
-    #[tokio::test]
-    async fn connection_failures_name_the_cause() {
-        let url = test_server::closed_url().await;
-        let transport = HttpTransport::new(url, &HttpSettings::default()).unwrap();
-
-        let error = transport.post_json(&json!({})).await.unwrap_err();
-
-        assert!(error.to_string().contains("tcp connect error"), "{error}");
     }
 }

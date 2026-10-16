@@ -13,8 +13,8 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::{RootCertStore, ServerConfig};
 
-pub const TEST_CA: &[u8] = include_bytes!("../fixtures/test-ca.pem");
-const LOCALHOST: &[u8] = include_bytes!("../fixtures/localhost.pem");
+pub const TEST_CA: &[u8] = include_bytes!("../../fixtures/test-ca.pem");
+const LOCALHOST: &[u8] = include_bytes!("../../fixtures/localhost.pem");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientAuth {

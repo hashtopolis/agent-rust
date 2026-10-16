@@ -52,14 +52,14 @@ jobs:
         run: |
           rsync --version
           echo "HTP_RSYNC_TEST=1" >> "$GITHUB_ENV"
-      # tests/tls talks to a local HTTPS server signed by tests/fixtures/test-ca.pem.
+      # tests/http talks to a local HTTPS server signed by tests/fixtures/test-ca.pem.
       # First prove SSL_CERT_FILE works on each OS, then install the CA into the
       # OS trust store so the main test run exercises the platform store.
       # The install steps never undo themselves and the localhost key is in the
       # repo, so they run only on throwaway GitHub-hosted runners.
       - name: Test TLS trust via SSL_CERT_FILE
         shell: bash
-        run: cargo test --locked --test tls
+        run: cargo test --locked --test http
         env:
           HTP_TRUST_STORE_TEST: "1"
           SSL_CERT_FILE: ${{ github.workspace }}/tests/fixtures/test-ca.pem
