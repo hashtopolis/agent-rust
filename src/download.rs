@@ -83,21 +83,29 @@ impl HttpDownloader {
 
         (target.origin() == server.origin()).then_some(auth)
     }
+
+    fn request(&self, url: &str) -> reqwest::RequestBuilder {
+        let request = self.client.get(url);
+
+        match self.auth_for(url) {
+            Some(auth) => auth.apply(request),
+            None => request,
+        }
+    }
 }
 
 impl Downloader for HttpDownloader {
     async fn download(&self, url: &str, dest: &Path) -> Result<(), DownloadError> {
         let url = self.resolve(url);
 
-        let mut request = self.client.get(&url);
-        if let Some(auth) = self.auth_for(&url) {
-            request = auth.apply(request);
-        }
-
-        let mut response = request.send().await.map_err(|source| DownloadError::Http {
-            url: url.clone(),
-            source,
-        })?;
+        let mut response =
+            self.request(&url)
+                .send()
+                .await
+                .map_err(|source| DownloadError::Http {
+                    url: url.clone(),
+                    source,
+                })?;
 
         let status = response.status();
 
@@ -154,6 +162,8 @@ impl Downloader for HttpDownloader {
 mod tests {
     use super::*;
 
+    use reqwest::header::AUTHORIZATION;
+
     use crate::http::BasicAuth;
 
     fn downloader(base_url: &str) -> HttpDownloader {
@@ -184,40 +194,46 @@ mod tests {
         BasicAuth::new("agent", "secret")
     }
 
+    fn authorization(d: &HttpDownloader, url: &str) -> Option<String> {
+        let request = d.request(&d.resolve(url)).build().unwrap();
+
+        request
+            .headers()
+            .get(AUTHORIZATION)
+            .map(|value| value.to_str().unwrap().to_string())
+    }
+
     #[test]
-    fn auth_goes_only_to_the_server_origin() {
+    fn basic_auth_goes_only_to_the_server_origin() {
         let d = downloader("https://server.example/api/server.php").with_auth(Some(auth()));
 
-        assert!(
-            d.auth_for("https://server.example/getFile/1/words.txt")
-                .is_some()
-        );
-        assert!(
-            d.auth_for("https://SERVER.example:443/getFile/1/words.txt")
-                .is_some()
-        );
-        assert!(
-            d.auth_for("https://hashcat.net/files/hashcat-6.2.6.7z")
-                .is_none()
-        );
-        assert!(
-            d.auth_for("http://server.example/getFile/1/words.txt")
-                .is_none()
-        );
-        assert!(
-            d.auth_for("https://server.example:8443/getFile/1/words.txt")
-                .is_none()
-        );
-        assert!(d.auth_for("https://server.example.evil.test/x").is_none());
+        for url in [
+            "getFile/1/words.txt",
+            "https://server.example/getFile/1/words.txt",
+            "https://SERVER.example:443/getFile/1/words.txt",
+        ] {
+            // base64("agent:secret")
+            assert_eq!(
+                authorization(&d, url).as_deref(),
+                Some("Basic YWdlbnQ6c2VjcmV0"),
+                "{url}"
+            );
+        }
+
+        for url in [
+            "https://hashcat.net/files/hashcat-6.2.6.7z",
+            "http://server.example/getFile/1/words.txt",
+            "https://server.example:8443/getFile/1/words.txt",
+            "https://server.example.evil.test/x",
+        ] {
+            assert_eq!(authorization(&d, url), None, "{url}");
+        }
     }
 
     #[test]
     fn no_auth_configured_sends_none() {
         let d = downloader("https://server.example/api/server.php");
 
-        assert!(
-            d.auth_for("https://server.example/getFile/1/words.txt")
-                .is_none()
-        );
+        assert_eq!(authorization(&d, "getFile/1/words.txt"), None);
     }
 }

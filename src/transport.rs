@@ -48,18 +48,22 @@ impl HttpTransport {
     pub fn url(&self) -> &str {
         &self.url
     }
+
+    fn request(&self, body: &Value) -> reqwest::RequestBuilder {
+        let request = self.client.post(&self.url).json(body);
+
+        match &self.auth {
+            Some(auth) => auth.apply(request),
+            None => request,
+        }
+    }
 }
 
 impl Transport for HttpTransport {
     async fn post_json(&self, body: &Value) -> Result<Value, TransportError> {
         tracing::trace!(url = %self.url, request = %body, "api request");
 
-        let mut request = self.client.post(&self.url).json(body);
-        if let Some(auth) = &self.auth {
-            request = auth.apply(request);
-        }
-
-        let response = request.send().await?;
+        let response = self.request(body).send().await?;
         let status = response.status();
 
         if !status.is_success() {
@@ -79,7 +83,41 @@ impl Transport for HttpTransport {
 mod tests {
     use super::*;
 
+    use reqwest::header::AUTHORIZATION;
+    use serde_json::json;
+
     use crate::config::{BasicAuthConfig, Server};
+
+    fn authorization(settings: &HttpSettings) -> Option<String> {
+        let transport =
+            HttpTransport::new("https://server.example/api/server.php", settings).unwrap();
+        let request = transport.request(&json!({})).build().unwrap();
+
+        request
+            .headers()
+            .get(AUTHORIZATION)
+            .map(|value| value.to_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn api_requests_carry_basic_auth() {
+        let settings = HttpSettings::from_server(&Server {
+            basic_auth: Some(BasicAuthConfig::new("agent", "secret")),
+            ..Server::default()
+        })
+        .unwrap();
+
+        // base64("agent:secret")
+        assert_eq!(
+            authorization(&settings).as_deref(),
+            Some("Basic YWdlbnQ6c2VjcmV0")
+        );
+    }
+
+    #[test]
+    fn api_requests_without_auth_send_no_authorization_header() {
+        assert_eq!(authorization(&HttpSettings::default()), None);
+    }
 
     #[test]
     fn debug_output_hides_secrets() {
