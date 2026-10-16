@@ -9,6 +9,7 @@ pub mod client;
 pub mod config;
 pub mod cracker;
 pub mod download;
+pub mod http;
 pub mod identity;
 pub mod log;
 pub mod model;
