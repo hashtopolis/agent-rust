@@ -52,5 +52,34 @@ jobs:
         run: |
           rsync --version
           echo "HTP_RSYNC_TEST=1" >> "$GITHUB_ENV"
+      # tests/tls talks to a local HTTPS server signed by tests/fixtures/test-ca.pem.
+      # First prove SSL_CERT_FILE works on each OS, then install the CA into the
+      # OS trust store so the main test run exercises the platform store.
+      # The install steps never undo themselves and the localhost key is in the
+      # repo, so they run only on throwaway GitHub-hosted runners.
+      - name: Test TLS trust via SSL_CERT_FILE
+        shell: bash
+        run: cargo test --locked --test tls
+        env:
+          HTP_TRUST_STORE_TEST: "1"
+          SSL_CERT_FILE: ${{ github.workspace }}/tests/fixtures/test-ca.pem
+      - name: Trust the test CA (Linux)
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: |
+          sudo cp tests/fixtures/test-ca.pem /usr/local/share/ca-certificates/htp-agent-test-ca.crt
+          sudo update-ca-certificates
+      - name: Trust the test CA (macOS)
+        if: runner.os == 'macOS' && runner.environment == 'github-hosted'
+        run: |
+          # Lets add-trusted-cert change admin trust settings without a GUI prompt.
+          sudo security authorizationdb write com.apple.trust-settings.admin allow
+          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain tests/fixtures/test-ca.pem
+      - name: Trust the test CA (Windows)
+        if: runner.os == 'Windows' && runner.environment == 'github-hosted'
+        run: certutil -addstore -f Root tests\fixtures\test-ca.pem
+      - name: Enable trust store test
+        if: runner.environment == 'github-hosted'
+        shell: bash
+        run: echo "HTP_TRUST_STORE_TEST=1" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --locked

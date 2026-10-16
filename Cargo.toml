@@ -44,6 +44,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 self-replace = "1"
 tempfile = "3.27.0"
 
+[dev-dependencies]
+# Server side of the TLS tests; already in the tree through reqwest.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+
 [profile.release]
 strip = true
 
