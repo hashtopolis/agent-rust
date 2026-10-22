@@ -1,22 +1,28 @@
 //! The log file: rotated by size, gzip-compressed, and written from a
 //! background thread so rotation never stalls the agent's own threads.
 
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender};
-use std::thread;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
 
+/// How long a failed rotation waits before it is tried again.
+const ROTATION_RETRY: Duration = Duration::from_secs(10);
+
 /// A log file that is rotated before a write would take it past `max_size`.
-/// The live file moves to `.1` and is compressed to `.1.gz`, older rotations
-/// shift up one, and at most `max_files` of them are kept.
+/// The live file moves to `.1`, older rotations shift up one, and at most
+/// `max_files` of them are kept. `.1` is compressed to `.1.gz` on a thread of
+/// its own, so writing carries on meanwhile.
 ///
 /// A rotation that fails (on Windows, typically because another program holds
-/// one of the files open) is reported on stderr and retried on the next write;
-/// meanwhile lines keep going to the live file.
+/// one of the files open) is reported on stderr and retried after
+/// [`ROTATION_RETRY`]; meanwhile lines keep going to the live file.
 pub(crate) struct RotatingFile {
     path: PathBuf,
     max_size: u64,
@@ -24,7 +30,10 @@ pub(crate) struct RotatingFile {
     /// `None` between closing the file for a rotation and reopening it.
     file: Option<File>,
     size: u64,
-    rotation_failing: bool,
+    /// Set while rotation is failing: when to try again.
+    retry_at: Option<Instant>,
+    rotation_retry: Duration,
+    compressing: Option<JoinHandle<()>>,
 }
 
 impl RotatingFile {
@@ -39,12 +48,22 @@ impl RotatingFile {
             max_files,
             file: None,
             size: 0,
-            rotation_failing: false,
+            retry_at: None,
+            rotation_retry: ROTATION_RETRY,
+            compressing: None,
         };
 
         // A compression cut short by a crash or restart leaves its temporary
         // file behind; the plain rotation it was made from is still there.
         remove_if_exists(&log.compression_temp())?;
+
+        if let Err(error) = log.remove_extra_rotations() {
+            warn(format_args!(
+                "cannot remove old rotations of log file {}: {error}",
+                log.path.display()
+            ));
+        }
+
         log.live_file()?;
 
         Ok(log)
@@ -64,31 +83,42 @@ impl RotatingFile {
         Ok(self.file.as_mut().expect("opened above"))
     }
 
+    fn rotation_due(&self, len: u64) -> bool {
+        self.size > 0
+            && self.size + len > self.max_size
+            && self.retry_at.is_none_or(|at| Instant::now() >= at)
+    }
+
     fn rotate(&mut self) {
         // Windows cannot rename a file that is still open.
         self.file = None;
 
-        if let Err(error) = self.shift() {
-            if !self.rotation_failing {
-                eprintln!(
-                    "warning: cannot rotate log file {}: {error}; still writing to it",
-                    self.path.display()
-                );
-            }
-
-            self.rotation_failing = true;
+        // Deleted from outside: there is nothing to rotate, and the next write
+        // starts a new file.
+        if !self.path.exists() {
+            self.retry_at = None;
 
             return;
         }
 
-        self.rotation_failing = false;
+        // `.1` must not move while it is still being compressed.
+        self.finish_compression();
 
-        if let Err(error) = self.compress_newest() {
-            eprintln!(
-                "warning: cannot compress rotated log file {}: {error}; keeping it uncompressed",
-                self.rotated(1, false).display()
-            );
+        if let Err(error) = self.shift() {
+            if self.retry_at.is_none() {
+                warn(format_args!(
+                    "cannot rotate log file {}: {error}; still writing to it",
+                    self.path.display()
+                ));
+            }
+
+            self.retry_at = Some(Instant::now() + self.rotation_retry);
+
+            return;
         }
+
+        self.retry_at = None;
+        self.start_compression();
     }
 
     /// Move the live file to `.1`, shifting older rotations up one. Only the
@@ -112,26 +142,61 @@ impl RotatingFile {
         fs::rename(&self.path, self.rotated(1, false))
     }
 
-    /// Compress `.1` through a temporary file, so an interrupted run never
-    /// leaves a truncated `.gz` behind.
-    fn compress_newest(&self) -> io::Result<()> {
+    fn start_compression(&mut self) {
         let plain = self.rotated(1, false);
         let temp = self.compression_temp();
+        let compressed = self.rotated(1, true);
 
-        let compressed = (|| {
-            let mut encoder = GzEncoder::new(File::create(&temp)?, Compression::default());
-            io::copy(&mut File::open(&plain)?, &mut encoder)?;
-            encoder.finish()?;
+        let spawned = {
+            let (plain, temp, compressed) = (plain.clone(), temp.clone(), compressed.clone());
 
-            fs::rename(&temp, self.rotated(1, true))
-        })();
+            thread::Builder::new()
+                .name("log-compress".to_string())
+                .spawn(move || compress_rotation(&plain, &temp, &compressed))
+        };
 
-        if compressed.is_err() {
-            let _ = fs::remove_file(&temp);
+        match spawned {
+            Ok(handle) => self.compressing = Some(handle),
+            Err(_) => compress_rotation(&plain, &temp, &compressed),
+        }
+    }
+
+    fn finish_compression(&mut self) {
+        if let Some(compressing) = self.compressing.take() {
+            let _ = compressing.join();
+        }
+    }
+
+    /// Remove rotations numbered above `max_files`, left over from a higher
+    /// limit.
+    fn remove_extra_rotations(&self) -> io::Result<()> {
+        let directory = match self.path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+
+        let Some(name) = self.path.file_name().and_then(|name| name.to_str()) else {
+            return Ok(());
+        };
+
+        let prefix = format!("{name}.");
+
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+
+            let Some(suffix) = file_name.to_str().and_then(|n| n.strip_prefix(&prefix)) else {
+                continue;
+            };
+
+            let number = suffix.strip_suffix(".gz").unwrap_or(suffix);
+
+            if number.parse::<usize>().is_ok_and(|n| n > self.max_files) {
+                fs::remove_file(entry.path())?;
+            }
         }
 
-        compressed?;
-        fs::remove_file(plain)
+        Ok(())
     }
 
     /// A rotation may be plain (its compression failed) or compressed.
@@ -145,15 +210,17 @@ impl RotatingFile {
     }
 
     fn move_rotation(&self, from: usize, to: usize) -> io::Result<()> {
-        for compressed in [false, true] {
-            let source = self.rotated(from, compressed);
+        let compressed = self.rotated(from, true);
 
-            if source.exists() {
-                fs::rename(source, self.rotated(to, compressed))?;
-            }
+        if compressed.exists() {
+            // A plain copy next to it is one whose deletion failed after it
+            // was compressed; the compressed one is complete.
+            remove_if_exists(&self.rotated(from, false))?;
+
+            return fs::rename(compressed, self.rotated(to, true));
         }
 
-        Ok(())
+        fs::rename(self.rotated(from, false), self.rotated(to, false))
     }
 
     fn rotated(&self, n: usize, compressed: bool) -> PathBuf {
@@ -171,7 +238,7 @@ impl Write for RotatingFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let len = buf.len() as u64;
 
-        if self.size > 0 && self.size + len > self.max_size {
+        if self.rotation_due(len) {
             self.rotate();
         }
 
@@ -187,6 +254,41 @@ impl Write for RotatingFile {
             None => Ok(()),
         }
     }
+}
+
+/// Compress a rotation, keeping it uncompressed if that fails.
+fn compress_rotation(plain: &Path, temp: &Path, compressed: &Path) {
+    if let Err(error) = compress(plain, temp, compressed) {
+        warn(format_args!(
+            "cannot compress rotated log file {}: {error}; keeping it uncompressed",
+            plain.display()
+        ));
+    }
+}
+
+/// Compress `plain` into `compressed` through `temp`, so an interrupted run
+/// never leaves a truncated `.gz` behind.
+fn compress(plain: &Path, temp: &Path, compressed: &Path) -> io::Result<()> {
+    let written = (|| {
+        let mut encoder = GzEncoder::new(File::create(temp)?, Compression::fast());
+        io::copy(&mut File::open(plain)?, &mut encoder)?;
+        encoder.finish()?;
+
+        fs::rename(temp, compressed)
+    })();
+
+    if written.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+
+    written?;
+    fs::remove_file(plain)
+}
+
+/// Report a problem with the log file on stderr. A failing stderr is ignored:
+/// `eprintln!` would panic and take the writer thread down with it.
+fn warn(message: fmt::Arguments) {
+    let _ = writeln!(io::stderr(), "warning: {message}");
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -275,7 +377,7 @@ pub(crate) fn spawn(mut file: RotatingFile) -> io::Result<(BackgroundWriter, Log
                         Ok(()) => failing = false,
                         Err(error) => {
                             if !failing {
-                                eprintln!("warning: cannot write to the log file: {error}");
+                                warn(format_args!("cannot write to the log file: {error}"));
                             }
 
                             failing = true;
@@ -296,6 +398,7 @@ mod tests {
     use super::*;
 
     use std::io::Read;
+    use std::time::Duration;
 
     use flate2::read::GzDecoder;
     use tempfile::TempDir;
@@ -358,6 +461,13 @@ mod tests {
         }
     }
 
+    /// Wait for the background compression of the latest rotation.
+    fn settle(log: &mut RotatingFile) {
+        if let Some(compressing) = log.compressing.take() {
+            compressing.join().unwrap();
+        }
+    }
+
     #[test]
     fn rotates_before_a_line_would_cross_the_limit_and_never_splits_one() {
         let fixture = Fixture::new();
@@ -365,6 +475,7 @@ mod tests {
 
         log.write_all(b"12345\n").unwrap();
         log.write_all(b"abcdef\n").unwrap();
+        settle(&mut log);
 
         assert_eq!(fixture.live(), "abcdef\n");
         assert_eq!(fixture.compressed(1), "12345\n");
@@ -378,6 +489,7 @@ mod tests {
 
         log.write_all(b"too long\n").unwrap();
         log.write_all(b"x\n").unwrap();
+        settle(&mut log);
 
         assert_eq!(fixture.compressed(1), "too long\n");
         assert_eq!(fixture.live(), "x\n");
@@ -394,6 +506,7 @@ mod tests {
         assert_eq!(fixture.live(), "earlier\n0123456789\n");
 
         log.write_all(b"abc\n").unwrap();
+        settle(&mut log);
 
         assert_eq!(fixture.compressed(1), "earlier\n0123456789\n");
         assert_eq!(fixture.live(), "abc\n");
@@ -407,6 +520,8 @@ mod tests {
         for line in ["a\n", "b\n", "c\n", "d\n"] {
             log.write_all(line.as_bytes()).unwrap();
         }
+
+        settle(&mut log);
 
         assert_eq!(fixture.live(), "d\n");
         assert_eq!(fixture.compressed(1), "c\n");
@@ -449,6 +564,7 @@ mod tests {
         let mut log = fixture.open(2, 3);
 
         log.write_all(b"d\n").unwrap();
+        settle(&mut log);
 
         assert_eq!(fixture.live(), "d\n");
         assert_eq!(fixture.compressed(1), "c\n");
@@ -465,8 +581,10 @@ mod tests {
             log.write_all(line.as_bytes()).unwrap();
         }
 
+        settle(&mut log);
         fs::remove_file(fixture.rotated("2.gz")).unwrap();
         log.write_all(b"e\n").unwrap();
+        settle(&mut log);
 
         // Only `.1` moves up into the gap; `.3` stays where it was.
         assert_eq!(fixture.live(), "e\n");
@@ -487,10 +605,13 @@ mod tests {
 
         let fixture = Fixture::new();
         let mut log = fixture.open(2, 2);
+        log.rotation_retry = Duration::ZERO;
 
         for line in ["a\n", "b\n", "c\n"] {
             log.write_all(line.as_bytes()).unwrap();
         }
+
+        settle(&mut log);
 
         let set_mode = |mode| {
             fs::set_permissions(fixture.dir.path(), fs::Permissions::from_mode(mode)).unwrap()
@@ -506,10 +627,94 @@ mod tests {
         assert_eq!(fixture.compressed(2), "a\n");
 
         log.write_all(b"f\n").unwrap();
+        settle(&mut log);
 
         assert_eq!(fixture.live(), "f\n");
         assert_eq!(fixture.compressed(1), "c\nd\ne\n");
         assert_eq!(fixture.compressed(2), "b\n");
+    }
+
+    #[test]
+    fn rotations_beyond_max_files_are_removed_on_open() {
+        let fixture = Fixture::new();
+        fixture.write_gz(1, "c\n");
+        fixture.write_gz(2, "b\n");
+        fixture.write_gz(4, "a\n");
+        fs::write(fixture.rotated("3"), "plain\n").unwrap();
+        fs::write(fixture.rotated("old"), "not a rotation\n").unwrap();
+
+        fixture.open(10, 1);
+
+        assert_eq!(
+            fixture.files(),
+            ["agent.log", "agent.log.1.gz", "agent.log.old"]
+        );
+    }
+
+    #[test]
+    fn a_rotation_kept_both_plain_and_compressed_moves_on_compressed_only() {
+        let fixture = Fixture::new();
+        fs::write(&fixture.path, "c\n").unwrap();
+        fs::write(fixture.rotated("1"), "b\n").unwrap();
+        fixture.write_gz(1, "b\n");
+        let mut log = fixture.open(2, 3);
+
+        log.write_all(b"d\n").unwrap();
+        settle(&mut log);
+
+        assert_eq!(fixture.compressed(2), "b\n");
+        assert_eq!(
+            fixture.files(),
+            ["agent.log", "agent.log.1.gz", "agent.log.2.gz"]
+        );
+    }
+
+    #[test]
+    fn a_live_file_deleted_from_outside_is_recreated_without_a_rotation() {
+        let fixture = Fixture::new();
+        let mut log = fixture.open(2, 3);
+
+        for line in ["a\n", "b\n"] {
+            log.write_all(line.as_bytes()).unwrap();
+        }
+
+        settle(&mut log);
+        fs::remove_file(&fixture.path).unwrap();
+        log.write_all(b"c\n").unwrap();
+        settle(&mut log);
+
+        assert_eq!(fixture.live(), "c\n");
+        assert_eq!(fixture.compressed(1), "a\n");
+        assert_eq!(fixture.files(), ["agent.log", "agent.log.1.gz"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_rotation_is_not_retried_on_every_line() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root ignores directory permissions, so the rename would not fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let fixture = Fixture::new();
+        let mut log = fixture.open(2, 2);
+        log.write_all(b"a\n").unwrap();
+
+        let set_mode = |mode| {
+            fs::set_permissions(fixture.dir.path(), fs::Permissions::from_mode(mode)).unwrap()
+        };
+
+        set_mode(0o555);
+        log.write_all(b"b\n").unwrap();
+        set_mode(0o755);
+        log.write_all(b"c\n").unwrap();
+        settle(&mut log);
+
+        // The rename would work again, but the retry interval has not passed.
+        assert_eq!(fixture.live(), "a\nb\nc\n");
+        assert_eq!(fixture.files(), ["agent.log"]);
     }
 
     #[test]
