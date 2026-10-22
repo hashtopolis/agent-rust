@@ -27,6 +27,16 @@ pub enum Step {
     Continue,
     Sleep(Duration),
     Shutdown,
+    /// An update is installed; the agent should stop and restart into it.
+    Restart,
+}
+
+/// Why [`Agent::run`] returned.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Exit<R> {
+    Shutdown,
+    /// Restart into this installed update once the process has wound down.
+    Restart(R),
 }
 
 pub struct LoopState {
@@ -64,7 +74,7 @@ impl Default for LoopState {
 }
 
 impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
-    pub async fn run(&mut self) -> Result<(), AgentError> {
+    pub async fn run(&mut self) -> Result<Exit<P::Restart>, AgentError> {
         tracing::debug!("entering agent loop");
 
         let mut state = LoopState::new();
@@ -80,11 +90,19 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                 Step::Continue => {}
                 Step::Sleep(delay) => {
                     tokio::select! {
-                        _ = &mut shutdown => return Ok(()),
+                        _ = &mut shutdown => return Ok(Exit::Shutdown),
                         _ = sleep(delay) => {}
                     }
                 }
-                Step::Shutdown => return Ok(()),
+                Step::Shutdown => return Ok(Exit::Shutdown),
+                Step::Restart => {
+                    let restart = self
+                        .pending_restart
+                        .take()
+                        .expect("a restart step follows an installed update");
+
+                    return Ok(Exit::Restart(restart));
+                }
             }
         }
     }
@@ -183,7 +201,9 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                 return Ok(Step::Sleep(RETRY_DELAY));
             }
 
-            self.maybe_check_version().await;
+            if self.maybe_check_version().await {
+                return Ok(Step::Restart);
+            }
 
             // Brain runs consult a found-hashes file; the cracker owns where it
             // wants that staged (hashcat's potfile), and the provisioner just
@@ -290,7 +310,9 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                             state.invalidate_setup();
                         }
 
-                        self.maybe_check_version().await;
+                        if self.maybe_check_version().await {
+                            return Ok(Step::Restart);
+                        }
 
                         Ok(Step::Continue)
                     }
@@ -330,13 +352,23 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
         }
     }
 
-    async fn maybe_check_version(&self) {
+    /// True once an update is installed and the agent should restart into it.
+    async fn maybe_check_version(&mut self) -> bool {
         if self.config.settings().behavior.disable_update {
-            return;
+            return false;
         }
 
-        if let Err(error) = self.provisioner.check_client_version(&self.client).await {
-            tracing::warn!(%error, "client version check failed");
+        match self.provisioner.check_client_version(&self.client).await {
+            Ok(restart) => {
+                self.pending_restart = restart;
+
+                self.pending_restart.is_some()
+            }
+            Err(error) => {
+                tracing::warn!(%error, "client version check failed");
+
+                false
+            }
         }
     }
 
