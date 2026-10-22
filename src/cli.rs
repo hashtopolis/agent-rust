@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use crate::config::{
-    ByteSize, DEFAULT_SETTINGS_FILE, DEFAULT_STATE_FILE, LogFileConfig, Overrides,
+    ByteSize, DEFAULT_SETTINGS_FILE, DEFAULT_STATE_FILE, LogFileConfig, LogLevel, Overrides,
 };
 
 // No `Debug`: `--proxy` may carry credentials.
@@ -92,6 +92,12 @@ pub struct Cli {
     /// How many rotated log files to keep (default 5).
     #[arg(long)]
     pub log_max_files: Option<NonZeroUsize>,
+
+    /// How much goes into the log file: normal, debug, trace, or a RUST_LOG
+    /// style filter such as htp_agent=trace,hyper=debug. Defaults to what the
+    /// console gets.
+    #[arg(long)]
+    pub log_file_level: Option<LogLevel>,
 }
 
 impl Cli {
@@ -111,6 +117,8 @@ impl Cli {
         if let Some(max_files) = self.log_max_files {
             log.max_files = max_files;
         }
+
+        log.level = self.log_file_level.clone();
 
         Some(log)
     }
@@ -136,6 +144,7 @@ impl Cli {
             log_file: self.log_file.clone(),
             log_max_size: self.log_max_size,
             log_max_files: self.log_max_files,
+            log_file_level: self.log_file_level.clone(),
         }
     }
 }
@@ -152,6 +161,8 @@ mod tests {
             "agent.log",
             "--log-max-files",
             "2",
+            "--log-file-level",
+            "trace",
         ])
         .unwrap();
 
@@ -160,6 +171,7 @@ mod tests {
         assert_eq!(log.file, PathBuf::from("agent.log"));
         assert_eq!(log.max_files.get(), 2);
         assert_eq!(log.max_size.bytes(), 10_485_760);
+        assert_eq!(log.level, Some(LogLevel::Trace));
     }
 
     #[test]

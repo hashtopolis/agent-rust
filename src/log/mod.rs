@@ -10,12 +10,13 @@ use std::io;
 use std::path::Path;
 
 use tracing::Subscriber;
+use tracing::level_filters::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
-use crate::config::LogFileConfig;
+use crate::config::{LogFileConfig, LogLevel};
 
 use file::{BackgroundWriter, RotatingFile};
 
@@ -34,17 +35,20 @@ pub enum Verbosity {
 /// With no `RUST_LOG` the filter keeps the agent's own output in the foreground
 /// and dependency chatter (hyper, reqwest, rustls, h2, ...) in the background,
 /// even in debug or trace mode. An explicit `RUST_LOG` takes full control, and
-/// an empty `RUST_LOG` is the "log absolutely everything" escape hatch. The
-/// filter applies to the console and the file alike.
+/// an empty `RUST_LOG` is the "log absolutely everything" escape hatch. The file
+/// gets the same unless its config sets a `level` of its own.
 ///
 /// If the log file cannot be opened, console logging is still installed so the
 /// caller can report the error.
 pub fn init(verbosity: Verbosity, file: Option<&LogFileConfig>) -> io::Result<LogGuard> {
-    let filter = match std::env::var("RUST_LOG") {
-        Ok(value) if !value.trim().is_empty() => EnvFilter::new(value),
-        Ok(_) => EnvFilter::new("trace"),
-        Err(_) => EnvFilter::new(default_filter(verbosity)),
-    };
+    let rust_log = std::env::var("RUST_LOG").ok();
+    let console_filter = console_filter(verbosity, rust_log.as_deref());
+
+    let file_filter =
+        file.map(|file| file_filter(verbosity, rust_log.as_deref(), file.level.as_ref()));
+    let file_traces = file_filter
+        .as_ref()
+        .is_some_and(|filter| filter.max_level_hint() == Some(LevelFilter::TRACE));
 
     let opened = file.map(open_file).transpose();
 
@@ -54,11 +58,20 @@ pub fn init(verbosity: Verbosity, file: Option<&LogFileConfig>) -> io::Result<Lo
         Err(error) => (None, LogGuard::console_only(), Some(error)),
     };
 
+    let file_layer = writer
+        .zip(file_filter)
+        .map(|(writer, filter)| file_layer(writer).with_filter(filter));
+
     tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer())
-        .with(writer.map(file_layer))
+        .with(tracing_subscriber::fmt::layer().with_filter(console_filter))
+        .with(file_layer)
         .init();
+
+    if file_traces && error.is_none() {
+        tracing::warn!(
+            "the log file records trace output, including full request and response bodies with the agent token"
+        );
+    }
 
     match error {
         Some(error) => Err(error),
@@ -88,6 +101,29 @@ where
     tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_writer(move || writer.clone())
+}
+
+fn console_filter(verbosity: Verbosity, rust_log: Option<&str>) -> EnvFilter {
+    match rust_log {
+        Some(value) if !value.trim().is_empty() => EnvFilter::new(value),
+        Some(_) => EnvFilter::new("trace"),
+        None => EnvFilter::new(default_filter(verbosity)),
+    }
+}
+
+/// The file's own `level` if it has one, the console's filter otherwise.
+fn file_filter(
+    verbosity: Verbosity,
+    rust_log: Option<&str>,
+    level: Option<&LogLevel>,
+) -> EnvFilter {
+    match level {
+        None => console_filter(verbosity, rust_log),
+        Some(LogLevel::Normal) => EnvFilter::new(default_filter(Verbosity::Normal)),
+        Some(LogLevel::Debug) => EnvFilter::new(default_filter(Verbosity::Debug)),
+        Some(LogLevel::Trace) => EnvFilter::new(default_filter(Verbosity::Trace)),
+        Some(LogLevel::Filter(filter)) => EnvFilter::new(filter),
+    }
 }
 
 /// The default log filter when `RUST_LOG` is unset: the agent's own crate at the
@@ -224,6 +260,57 @@ mod tests {
         assert!(text.contains("WARN"), "{text:?}");
         assert!(text.contains("chunk failed task_id=7"), "{text:?}");
         assert!(!text.contains('\x1b'), "{text:?}");
+    }
+
+    /// What reaches the file of an agent whose console runs at `verbosity`
+    /// under `rust_log`, with the file at `level`.
+    fn logged_to_file(verbosity: Verbosity, rust_log: Option<&str>, level: Option<&str>) -> String {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("agent.log");
+        let (writer, guard) = file::spawn(RotatingFile::open(&path, 1 << 20, 5).unwrap()).unwrap();
+        let level = level.map(|level| level.parse().unwrap());
+        let filter = file_filter(verbosity, rust_log, level.as_ref());
+        let subscriber =
+            tracing_subscriber::registry().with(file_layer(writer).with_filter(filter));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!("agent debug");
+            tracing::trace!("agent trace");
+            tracing::info!(target: "hyper", "dependency info");
+            tracing::trace!(target: "hyper", "dependency trace");
+        });
+        guard.flush();
+
+        fs::read_to_string(&path).unwrap()
+    }
+
+    #[test]
+    fn without_a_level_of_its_own_the_file_gets_what_the_console_gets() {
+        let normal = logged_to_file(Verbosity::Normal, None, None);
+        let debug = logged_to_file(Verbosity::Debug, None, None);
+        let rust_log = logged_to_file(Verbosity::Normal, Some("hyper=trace"), None);
+
+        assert!(!normal.contains("agent debug"), "{normal}");
+        assert!(debug.contains("agent debug"), "{debug}");
+        assert!(!debug.contains("agent trace"), "{debug}");
+        assert!(rust_log.contains("dependency trace"), "{rust_log}");
+    }
+
+    #[test]
+    fn a_trace_file_gets_the_agents_trace_but_keeps_dependencies_quieter() {
+        let text = logged_to_file(Verbosity::Normal, Some("hyper=trace"), Some("trace"));
+
+        assert!(text.contains("agent trace"), "{text}");
+        assert!(text.contains("dependency info"), "{text}");
+        assert!(!text.contains("dependency trace"), "{text}");
+    }
+
+    #[test]
+    fn a_filter_level_is_used_as_given() {
+        let text = logged_to_file(Verbosity::Trace, None, Some("hyper=trace"));
+
+        assert!(text.contains("dependency trace"), "{text}");
+        assert!(!text.contains("agent debug"), "{text}");
     }
 
     #[test]
