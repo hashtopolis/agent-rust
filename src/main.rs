@@ -8,6 +8,7 @@ use htp_agent::cli::Cli;
 use htp_agent::client::Client;
 use htp_agent::config::{Config, Settings};
 use htp_agent::download::HttpDownloader;
+use htp_agent::http::HttpSettings;
 use htp_agent::log::Verbosity;
 use htp_agent::provisioner::DiskProvisioner;
 use htp_agent::transport::HttpTransport;
@@ -37,7 +38,13 @@ async fn run(cli: Cli) -> Result<()> {
     let config = Config::load(&cli.config, &cli.state, cli.overrides())?;
 
     let url = config.require_url()?;
-    let transport = HttpTransport::new(url).context("building the HTTP transport")?;
+    let http = HttpSettings::from_server(&config.settings().server)?;
+
+    if http.sends_credentials_in_clear(url) {
+        tracing::warn!("server.url is plain http: basic auth credentials are sent unencrypted");
+    }
+
+    let transport = HttpTransport::new(url, &http).context("building the HTTP transport")?;
 
     if cli.de_register {
         let Some(token) = config.token() else {
@@ -50,7 +57,15 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    let downloader = HttpDownloader::new(reqwest::Client::new(), transport.url());
+    // No timeout here: downloads may stream for many minutes.
+    let downloader = {
+        let client = http
+            .client_builder()
+            .build()
+            .context("building the download client")?;
+
+        HttpDownloader::new(client, transport.url()).with_auth(http.auth().cloned())
+    };
 
     let provisioner = {
         let settings = config.settings();
