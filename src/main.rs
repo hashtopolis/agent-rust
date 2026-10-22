@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 
-use htp_agent::agent::{Agent, deregister};
+use htp_agent::agent::{Agent, Exit, deregister};
 use htp_agent::backend::hashcat::AutoPipePolicy;
 use htp_agent::cli::Cli;
 use htp_agent::client::Client;
@@ -12,9 +12,9 @@ use htp_agent::http::HttpSettings;
 use htp_agent::log::Verbosity;
 use htp_agent::provisioner::DiskProvisioner;
 use htp_agent::transport::HttpTransport;
+use htp_agent::update::PendingRestart;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let verbosity = match (cli.trace, cli.debug) {
@@ -24,8 +24,20 @@ async fn main() -> ExitCode {
     };
     htp_agent::log::init(verbosity);
 
-    match run(cli).await {
-        Ok(()) => ExitCode::SUCCESS,
+    match run(&cli) {
+        Ok(Exit::Shutdown) => ExitCode::SUCCESS,
+        Ok(Exit::Restart(update)) => {
+            tracing::info!("restarting into the installed update");
+
+            match update.restart() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    tracing::error!("agent exited: restarting into the update failed: {error:#}");
+
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Err(error) => {
             tracing::error!("agent exited: {error:#}");
 
@@ -34,7 +46,16 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli) -> Result<()> {
+/// Run the agent on its own runtime. The runtime is dropped before this
+/// returns, which ends every task (and the crackers they started), so a restart
+/// begins from a settled process.
+fn run(cli: &Cli) -> Result<Exit<PendingRestart>> {
+    let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
+
+    runtime.block_on(run_agent(cli))
+}
+
+async fn run_agent(cli: &Cli) -> Result<Exit<PendingRestart>> {
     let config = Config::load(&cli.config, &cli.state, cli.overrides())?;
 
     let url = config.require_url()?;
@@ -54,7 +75,7 @@ async fn run(cli: Cli) -> Result<()> {
         let client = Client::with_token(transport, token);
         deregister(&client, &config).await?;
 
-        return Ok(());
+        return Ok(Exit::Shutdown);
     }
 
     // No timeout here: downloads may stream for many minutes.
@@ -84,9 +105,8 @@ async fn run(cli: Cli) -> Result<()> {
     };
 
     let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
-    agent.run().await?;
 
-    Ok(())
+    Ok(agent.run().await?)
 }
 
 struct ProvisionerSettings {

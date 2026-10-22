@@ -1,11 +1,11 @@
 use std::time::Duration;
 
-use htp_agent::agent::{Agent, AgentError, LoopState, Step};
+use htp_agent::agent::{Agent, AgentError, Exit, LoopState, Step};
 use htp_agent::client::Client;
 use serde_json::{Value, json};
 
 use crate::support::env::{Env, test_session};
-use crate::support::provisioner::{FakeCracker, FakeProvisioner, Stage};
+use crate::support::provisioner::{FakeCracker, FakeProvisioner, FakeRestart, Stage};
 use crate::support::transport::{
     ScriptedTransport, health_check_reply, progress_continue, success, task_reply,
     task_reply_with_brain, task_reply_with_preprocessor,
@@ -283,6 +283,48 @@ async fn a_tick_that_never_runs_a_chunk_checks_version_once() {
             Stage::CheckVersion,
         ]
     );
+}
+
+#[tokio::test]
+async fn an_update_installed_during_prep_restarts_before_asking_for_a_chunk() {
+    let mut rig = AgentRig::with_provisioner(
+        [task_reply(25, 45, 13)],
+        FakeProvisioner::new().updating_on_check(1),
+    );
+
+    let step = rig.tick().await.unwrap();
+
+    assert_eq!(step, Step::Restart);
+    assert!(!rig.transport.actions().contains(&"getChunk".to_string()));
+    assert_eq!(rig.provisioner.calls().last(), Some(&Stage::CheckVersion));
+}
+
+#[tokio::test]
+async fn an_update_installed_after_a_chunk_restarts_instead_of_continuing() {
+    let mut rig = AgentRig::with_provisioner(
+        [
+            task_reply(25, 45, 13),
+            chunk_reply(10_000),
+            progress_continue(),
+        ],
+        FakeProvisioner::new().updating_on_check(2),
+    );
+
+    let step = rig.tick().await.unwrap();
+
+    assert_eq!(step, Step::Restart);
+}
+
+#[tokio::test]
+async fn run_hands_the_installed_update_back_to_its_caller() {
+    let mut rig = AgentRig::with_provisioner(
+        [task_reply(25, 45, 13)],
+        FakeProvisioner::new().updating_on_check(1),
+    );
+
+    let exit = rig.agent.run().await.unwrap();
+
+    assert_eq!(exit, Exit::Restart(FakeRestart));
 }
 
 #[tokio::test]
