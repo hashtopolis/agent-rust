@@ -117,6 +117,11 @@ A fuller one:
   },
   "cracker": {
     "hashcat_path": "/opt/homebrew/bin/hashcat"
+  },
+  "log": {
+    "file": "htp-agent.log",
+    "max_size": "10MB",
+    "max_files": 5
   }
 }
 ```
@@ -154,12 +159,34 @@ Common settings also have CLI flags, which win over the config file:
   list
 - `--hashcat-path`
 - per-directory overrides like `--files-path`
+- `--log-file`, `--log-max-size` and `--log-max-files`
 
 `--debug` (`-d`) turns on debug logging. `--trace` goes one step further and
 also logs full API request and response bodies, including the agent token, so
 keep it to local debugging. Dependencies such as the HTTP stack always log less
 than the agent itself, so they don't drown it out. Setting `RUST_LOG` overrides all of this
 with a standard tracing filter, and an empty `RUST_LOG` logs everything.
+
+### Log file
+
+The agent always logs to the console. Where no service manager collects that
+output, Windows in particular, `log.file` (or `--log-file`) also writes it to a
+file, without colour codes. A relative path is resolved against the working
+directory, and a missing directory is created.
+
+Before a line would take the file past `log.max_size` (default `10MB`; `KB`,
+`MB` and `GB` count in 1024s, a bare number is bytes), the agent moves it to
+`htp-agent.log.1` and starts a new one. Older files shift up to `.2` and so on,
+and only the newest `log.max_files` (default 5) are kept; older ones, say after
+lowering the limit, are deleted at startup. A line is never split between two
+files, and a restart keeps appending to the current file.
+
+If a rotation fails, say because another program holds one of the files open
+on Windows, the agent warns on stderr, keeps writing to the current file and
+tries again 10 seconds later. A log file that cannot be opened at startup stops
+the agent with an error. If the config file itself cannot be loaded, the error
+still goes to the file given with `--log-file`. The size and count flags need a
+log file, from either the config file or `--log-file`.
 
 ### Server connection
 
