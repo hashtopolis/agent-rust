@@ -1,16 +1,15 @@
-//! The log file: rotated by size, gzip-compressed, and written from a
-//! background thread so rotation never stalls the agent's own threads.
+//! The log file: rotated by size and gzip-compressed.
 
-use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
+
+use super::warn;
 
 /// How long a failed rotation waits before it is tried again.
 const ROTATION_RETRY: Duration = Duration::from_secs(10);
@@ -23,7 +22,7 @@ const ROTATION_RETRY: Duration = Duration::from_secs(10);
 /// A rotation that fails (on Windows, typically because another program holds
 /// one of the files open) is reported on stderr and retried after
 /// [`ROTATION_RETRY`]; meanwhile lines keep going to the live file.
-pub(crate) struct RotatingFile {
+pub(super) struct RotatingFile {
     path: PathBuf,
     max_size: u64,
     max_files: usize,
@@ -37,7 +36,7 @@ pub(crate) struct RotatingFile {
 }
 
 impl RotatingFile {
-    pub(crate) fn open(path: &Path, max_size: u64, max_files: usize) -> io::Result<Self> {
+    pub(super) fn open(path: &Path, max_size: u64, max_files: usize) -> io::Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -285,12 +284,6 @@ fn compress(plain: &Path, temp: &Path, compressed: &Path) -> io::Result<()> {
     fs::remove_file(plain)
 }
 
-/// Report a problem with the log file on stderr. A failing stderr is ignored:
-/// `eprintln!` would panic and take the writer thread down with it.
-fn warn(message: fmt::Arguments) {
-    let _ = writeln!(io::stderr(), "warning: {message}");
-}
-
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
@@ -303,94 +296,6 @@ fn remove_if_exists(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         result => result,
     }
-}
-
-/// How many log lines may queue up for the writer thread before logging waits.
-const QUEUE_LINES: usize = 1024;
-
-enum Message {
-    Line(Vec<u8>),
-    Flush(SyncSender<()>),
-}
-
-/// Hands each log line to the writer thread.
-#[derive(Clone)]
-pub(crate) struct BackgroundWriter(SyncSender<Message>);
-
-impl Write for BackgroundWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .send(Message::Line(buf.to_vec()))
-            .map_err(|_| io::Error::other("the log writer thread has stopped"))?;
-
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Keeps the log file complete: dropping it, or calling [`LogGuard::flush`],
-/// waits until every line logged so far is in the file.
-pub struct LogGuard(Option<SyncSender<Message>>);
-
-impl LogGuard {
-    pub(crate) fn console_only() -> Self {
-        Self(None)
-    }
-
-    /// Block until every line logged so far is in the file. Logging carries on
-    /// afterwards.
-    pub fn flush(&self) {
-        let Some(sender) = &self.0 else {
-            return;
-        };
-
-        let (done, written) = mpsc::sync_channel(1);
-
-        if sender.send(Message::Flush(done)).is_ok() {
-            let _ = written.recv();
-        }
-    }
-}
-
-impl Drop for LogGuard {
-    fn drop(&mut self) {
-        self.flush();
-    }
-}
-
-/// Start the writer thread that owns `file`. It lives as long as the process:
-/// the subscriber keeps a sender for good.
-pub(crate) fn spawn(mut file: RotatingFile) -> io::Result<(BackgroundWriter, LogGuard)> {
-    let (sender, receiver) = mpsc::sync_channel(QUEUE_LINES);
-
-    thread::Builder::new()
-        .name("log-writer".to_string())
-        .spawn(move || {
-            let mut failing = false;
-
-            for message in receiver {
-                match message {
-                    Message::Line(line) => match file.write_all(&line) {
-                        Ok(()) => failing = false,
-                        Err(error) => {
-                            if !failing {
-                                warn(format_args!("cannot write to the log file: {error}"));
-                            }
-
-                            failing = true;
-                        }
-                    },
-                    Message::Flush(done) => {
-                        let _ = done.send(());
-                    }
-                }
-            }
-        })?;
-
-    Ok((BackgroundWriter(sender.clone()), LogGuard(Some(sender))))
 }
 
 #[cfg(test)]
@@ -714,44 +619,5 @@ mod tests {
         // The rename would work again, but the retry interval has not passed.
         assert_eq!(fixture.live(), "a\nb\nc\n");
         assert_eq!(fixture.files(), ["agent.log"]);
-    }
-
-    #[test]
-    fn flush_waits_until_every_queued_line_is_in_the_file() {
-        let fixture = Fixture::new();
-        let (writer, guard) = spawn(fixture.open(1 << 20, 5)).unwrap();
-
-        for n in 0..500 {
-            writeln!(writer.clone(), "line {n}").unwrap();
-        }
-
-        guard.flush();
-
-        let expected: String = (0..500).map(|n| format!("line {n}\n")).collect();
-        assert_eq!(fixture.live(), expected);
-    }
-
-    #[test]
-    fn logging_carries_on_after_a_flush() {
-        let fixture = Fixture::new();
-        let (mut writer, guard) = spawn(fixture.open(1 << 20, 5)).unwrap();
-
-        writer.write_all(b"before\n").unwrap();
-        guard.flush();
-        writer.write_all(b"after\n").unwrap();
-        guard.flush();
-
-        assert_eq!(fixture.live(), "before\nafter\n");
-    }
-
-    #[test]
-    fn dropping_the_guard_flushes() {
-        let fixture = Fixture::new();
-        let (mut writer, guard) = spawn(fixture.open(1 << 20, 5)).unwrap();
-
-        writer.write_all(b"last words\n").unwrap();
-        drop(guard);
-
-        assert_eq!(fixture.live(), "last words\n");
     }
 }
