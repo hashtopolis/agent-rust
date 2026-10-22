@@ -46,6 +46,11 @@ src/
   transport.rs     # low-level HTTP: Transport trait, reqwest impl
   update.rs        # self-update machinery
 
+  log/
+    mod.rs         # logging module list and re-exports
+    subscriber.rs  # tracing subscriber: Verbosity, default filter, RUST_LOG
+    fields.rs      # self-rendering log fields: Invocation, HashRate, Percent, Keyspace
+
   model/
     mod.rs         # domain types: task assignment, Chunk, response types, ...
     raw.rs         # wire DTOs (serde): requests, responses, actions (crate-internal)
@@ -112,6 +117,7 @@ tests/
 - **config.rs** — typesafe config, no string-keyed lookups. Two files with distinct owners: `config.json` holds the user's settings and is **only ever read** by the agent (so it is safe to re-read every loop iteration, and hand edits survive); `state.json` is agent-owned and holds the token and uuid, rewritten atomically when either changes. CLI flags live in `Overrides`, applied over the settings on load and re-applied after every reload, and are never persisted back.
 - **sysinfo.rs** — OS and device inventory for registration / status reporting.
 - **process.rs** — spawning child processes, streaming stdio, reporting.
+- **log/**: logging. `subscriber.rs` installs the tracing subscriber and decides what is logged: the agent's own crate at the requested `Verbosity` with dependencies kept quieter, unless `RUST_LOG` takes over. `fields.rs` holds the field types that render themselves the way the log should read them: `Invocation` (a copy-pasteable command line), `HashRate`, `Percent` and `Keyspace`.
 - **update.rs**: self-update. On a `checkClientVersion` "NEW" reply the agent downloads the server's `rust-agent.zip`, reads `manifest.json`, picks the binary whose `triples` include this build's `agent_target()` and swaps the running executable (`self-replace`). It does not restart in place: the installed update travels back as a `PendingRestart` through the provisioner and the loop to `main`, which drops the runtime first and then re-execs (on Windows, spawns the new binary and exits). The check runs at the end of bootstrap, so an idle agent updates on restart, and in the loop once per task pickup and after each successful chunk. A failed check or install is logged and never stops the agent. A failed restart restores the previous executable and ends the agent, because its loop has already wound down by then. Opt-out via `behavior.disable_update`. Integrity rests on the TLS download: the endpoint carries no hash, so there is no signature check yet.
 
 ## Open questions / notes
