@@ -51,7 +51,7 @@ pub enum ConfigError {
     )]
     MissingVoucher { path: PathBuf },
     #[error(
-        "--log-max-size and --log-max-files need a log file: set log.file in {} or pass --log-file",
+        "--log-max-size, --log-max-files and --log-file-level need a log file: set log.file in {} or pass --log-file",
         path.display()
     )]
     LogOptionsWithoutFile { path: PathBuf },
@@ -195,6 +195,8 @@ pub struct CrackerConfig {
 
 /// Writing the log to a file as well as the console. Once the file would grow
 /// past `max_size` it is rotated and compressed, keeping `max_files` old ones.
+/// `level` sets how much goes into the file; without it the file gets what the
+/// console gets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogFileConfig {
@@ -203,15 +205,18 @@ pub struct LogFileConfig {
     pub max_size: ByteSize,
     #[serde(default = "LogFileConfig::default_max_files")]
     pub max_files: NonZeroUsize,
+    #[serde(default)]
+    pub level: Option<LogLevel>,
 }
 
 impl LogFileConfig {
-    /// `file` with the default size and count limits.
+    /// `file` with the default size and count limits, at the console's level.
     pub fn new(file: PathBuf) -> Self {
         Self {
             file,
             max_size: Self::default_max_size(),
             max_files: Self::default_max_files(),
+            level: None,
         }
     }
 
@@ -221,6 +226,58 @@ impl LogFileConfig {
 
     fn default_max_files() -> NonZeroUsize {
         NonZeroUsize::new(5).expect("non-zero")
+    }
+}
+
+/// How much to log: `normal`, `debug` or `trace` as with the console flags, or
+/// any other text as a `RUST_LOG`-style filter such as
+/// `htp_agent=trace,hyper=debug`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum LogLevel {
+    Normal,
+    Debug,
+    Trace,
+    Filter(String),
+}
+
+impl FromStr for LogLevel {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let text = text.trim();
+
+        // Case-insensitive like the filter syntax, where `TRACE` would
+        // otherwise turn every dependency up to trace as well.
+        match text.to_ascii_lowercase().as_str() {
+            "normal" => Ok(Self::Normal),
+            "debug" => Ok(Self::Debug),
+            "trace" => Ok(Self::Trace),
+            "" => Err("empty log level: expected normal, debug, trace or a filter".to_string()),
+            _ => tracing_subscriber::EnvFilter::builder()
+                .parse(text)
+                .map(|_| Self::Filter(text.to_string()))
+                .map_err(|error| format!("invalid log filter {text:?}: {error}")),
+        }
+    }
+}
+
+impl TryFrom<String> for LogLevel {
+    type Error = String;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        text.parse()
+    }
+}
+
+impl From<LogLevel> for String {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Normal => "normal".to_string(),
+            LogLevel::Debug => "debug".to_string(),
+            LogLevel::Trace => "trace".to_string(),
+            LogLevel::Filter(filter) => filter,
+        }
     }
 }
 
@@ -356,6 +413,7 @@ pub struct Overrides {
     pub log_file: Option<PathBuf>,
     pub log_max_size: Option<ByteSize>,
     pub log_max_files: Option<NonZeroUsize>,
+    pub log_file_level: Option<LogLevel>,
 }
 
 impl Overrides {
@@ -421,7 +479,10 @@ impl Overrides {
             }
         }
 
-        if self.log_max_size.is_some() || self.log_max_files.is_some() {
+        if self.log_max_size.is_some()
+            || self.log_max_files.is_some()
+            || self.log_file_level.is_some()
+        {
             let log = settings
                 .log
                 .as_mut()
@@ -435,6 +496,10 @@ impl Overrides {
 
             if let Some(max_files) = self.log_max_files {
                 log.max_files = max_files;
+            }
+
+            if let Some(level) = self.log_file_level {
+                log.level = Some(level);
             }
         }
 
@@ -681,6 +746,7 @@ mod tests {
                 file: PathBuf::from("/var/log/htp-agent.log"),
                 max_size: "500KB".parse().unwrap(),
                 max_files: NonZeroUsize::new(3).unwrap(),
+                level: Some("htp_agent=trace,hyper=debug".parse().unwrap()),
             }),
         };
 
@@ -1015,6 +1081,7 @@ mod tests {
         assert_eq!(log.file, PathBuf::from("agent.log"));
         assert_eq!(log.max_size.bytes(), 10_485_760);
         assert_eq!(log.max_files.get(), 5);
+        assert_eq!(log.level, None);
     }
 
     #[test]
@@ -1040,6 +1107,7 @@ mod tests {
             r#"{ "file": "agent.log", "max_size": "10XB" }"#,
             r#"{ "file": "agent.log", "max_size": 0 }"#,
             r#"{ "max_size": "10MB" }"#,
+            r#"{ "file": "agent.log", "level": "htp_agent=loud" }"#,
         ] {
             let fixture = Fixture::new();
             fixture.write_settings(&format!(r#"{{ "log": {log} }}"#));
@@ -1057,7 +1125,7 @@ mod tests {
     fn log_overrides_win_over_the_file() {
         let fixture = Fixture::new();
         fixture.write_settings(
-            r#"{ "log": { "file": "from-file.log", "max_size": "1MB", "max_files": 2 } }"#,
+            r#"{ "log": { "file": "from-file.log", "max_size": "1MB", "max_files": 2, "level": "debug" } }"#,
         );
 
         let config = fixture
@@ -1065,6 +1133,7 @@ mod tests {
                 log_file: Some(PathBuf::from("from-cli.log")),
                 log_max_size: Some("20MB".parse().unwrap()),
                 log_max_files: Some(NonZeroUsize::new(9).unwrap()),
+                log_file_level: Some(LogLevel::Trace),
                 ..Overrides::default()
             })
             .unwrap();
@@ -1073,6 +1142,7 @@ mod tests {
         assert_eq!(log.file, PathBuf::from("from-cli.log"));
         assert_eq!(log.max_size.bytes(), 20_971_520);
         assert_eq!(log.max_files.get(), 9);
+        assert_eq!(log.level, Some(LogLevel::Trace));
     }
 
     #[test]
@@ -1103,6 +1173,10 @@ mod tests {
                 log_max_size: Some("1MB".parse().unwrap()),
                 ..Overrides::default()
             },
+            Overrides {
+                log_file_level: Some(LogLevel::Trace),
+                ..Overrides::default()
+            },
         ] {
             let fixture = Fixture::new();
 
@@ -1117,5 +1191,43 @@ mod tests {
             assert!(message.contains("pass --log-file"), "{message}");
             assert!(message.contains(DEFAULT_SETTINGS_FILE), "{message}");
         }
+    }
+
+    #[test]
+    fn log_levels_take_a_verbosity_word_or_a_filter() {
+        for (text, level) in [
+            ("normal", LogLevel::Normal),
+            ("debug", LogLevel::Debug),
+            ("trace", LogLevel::Trace),
+            ("TRACE", LogLevel::Trace),
+            (" Debug ", LogLevel::Debug),
+            (
+                "htp_agent=trace,hyper=debug",
+                LogLevel::Filter("htp_agent=trace,hyper=debug".to_string()),
+            ),
+        ] {
+            assert_eq!(text.parse::<LogLevel>().unwrap(), level, "{text}");
+        }
+    }
+
+    #[test]
+    fn invalid_log_filters_are_rejected() {
+        for text in ["", "  ", "htp_agent=loud"] {
+            assert!(
+                text.parse::<LogLevel>().is_err(),
+                "{text:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn the_log_level_is_read_from_the_log_section() {
+        let fixture = Fixture::new();
+        fixture.write_settings(r#"{ "log": { "file": "agent.log", "level": "trace" } }"#);
+
+        let config = fixture.load(Overrides::default()).unwrap();
+
+        let log = config.settings().log.as_ref().unwrap();
+        assert_eq!(log.level, Some(LogLevel::Trace));
     }
 }

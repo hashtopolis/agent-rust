@@ -121,7 +121,8 @@ A fuller one:
   "log": {
     "file": "htp-agent.log",
     "max_size": "10MB",
-    "max_files": 5
+    "max_files": 5,
+    "level": "debug"
   }
 }
 ```
@@ -159,7 +160,7 @@ Common settings also have CLI flags, which win over the config file:
   list
 - `--hashcat-path`
 - per-directory overrides like `--files-path`
-- `--log-file`, `--log-max-size` and `--log-max-files`
+- `--log-file`, `--log-max-size`, `--log-max-files` and `--log-file-level`
 
 `--debug` (`-d`) turns on debug logging. `--trace` goes one step further and
 also logs full API request and response bodies, including the agent token, so
@@ -186,8 +187,16 @@ If a rotation fails, say because another program holds one of the files open
 on Windows, the agent warns on stderr, keeps writing to the current file and
 tries again 10 seconds later. A log file that cannot be opened at startup stops
 the agent with an error. If the config file itself cannot be loaded, the error
-still goes to the file given with `--log-file`. The size and count flags need a
-log file, from either the config file or `--log-file`.
+still goes to the file given with `--log-file`. The size, count and level flags
+need a log file, from either the config file or `--log-file`.
+
+The file gets the same output as the console unless `log.level` (or
+`--log-file-level`) says otherwise, so the console can stay quiet while the file
+records more. `normal`, `debug` and `trace` mean what the console flags mean;
+anything else is a `RUST_LOG`-style filter, such as
+`htp_agent=trace,hyper=debug`. `RUST_LOG` then affects only the console. Trace
+output includes full request and response bodies with the agent token, so the
+agent warns at startup when the file records it.
 
 ### Server connection
 
