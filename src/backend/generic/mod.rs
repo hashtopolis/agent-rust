@@ -77,7 +77,7 @@ pub mod status;
 use std::path::{Path, PathBuf};
 
 use crate::backend::args::Args;
-use crate::backend::paths::absolute;
+use crate::backend::paths::resolve_file_token;
 use crate::cracker::{ChunkOutcome, Cracker, CrackerError, HealthCheckOutcome, ProgressSink};
 use crate::model::{Chunk, CrackerId, ResolvedPreprocessor, TaskAssignment};
 
@@ -101,8 +101,8 @@ impl GenericCracker {
 
     /// Resolve the attack for a crack or benchmark run: swap the hashlist alias
     /// for the absolute hashlist path and resolve any token naming a file under
-    /// the files dir to its absolute path. `-a` and every other token pass
-    /// through
+    /// the files dir to its absolute path, including a `key=value` token whose
+    /// value names a file. `-a` and every other token pass through
     fn resolve_attack(&self, attack: &str, alias: &str, hashlist: &Path) -> Vec<String> {
         attack
             .split_whitespace()
@@ -136,13 +136,7 @@ impl GenericCracker {
     }
 
     fn resolve_file_token(&self, token: &str) -> String {
-        let candidate = self.paths.files.join(token);
-
-        if candidate.is_file() {
-            path_arg(&absolute(candidate))
-        } else {
-            token.to_owned()
-        }
+        resolve_file_token(&self.paths.files, token)
     }
 }
 
@@ -270,6 +264,32 @@ mod tests {
                 seeded(&dir, "rockyou.txt"),
             ]
         );
+    }
+
+    #[test]
+    fn crack_attack_resolves_key_value_file_tokens() {
+        let (dir, cracker) = cracker_with_files(&["hint.hcstat2"]);
+        let hashlist = PathBuf::from("/data/hashlists/1");
+
+        let args = cracker.resolve_attack("-a #HL# hintfile=hint.hcstat2", ALIAS, &hashlist);
+
+        assert_eq!(
+            args,
+            [
+                "-a".to_owned(),
+                "/data/hashlists/1".to_owned(),
+                format!("hintfile={}", seeded(&dir, "hint.hcstat2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn keyspace_attack_resolves_key_value_file_tokens() {
+        let (dir, cracker) = cracker_with_files(&["hint.hcstat2"]);
+
+        let args = cracker.resolve_keyspace_attack("-a #HL# hintfile=hint.hcstat2", ALIAS);
+
+        assert_eq!(args, [format!("hintfile={}", seeded(&dir, "hint.hcstat2"))]);
     }
 
     #[test]
