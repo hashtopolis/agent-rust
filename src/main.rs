@@ -22,12 +22,33 @@ fn main() -> ExitCode {
         (false, true) => Verbosity::Debug,
         (false, false) => Verbosity::Normal,
     };
-    htp_agent::log::init(verbosity);
 
-    match run(&cli) {
+    // The log file is configured in the config file, so logging starts after
+    // loading it; a config error is still reported, on the console.
+    let config = Config::load(&cli.config, &cli.state, cli.overrides());
+    let log_file = config
+        .as_ref()
+        .ok()
+        .and_then(|config| config.settings().log.as_ref());
+
+    let log = match htp_agent::log::init(verbosity, log_file) {
+        Ok(log) => log,
+        Err(error) => {
+            tracing::error!("agent exited: {error}");
+
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let exit = config
+        .map_err(anyhow::Error::from)
+        .and_then(|config| run(&cli, config));
+
+    match exit {
         Ok(Exit::Shutdown) => ExitCode::SUCCESS,
         Ok(Exit::Restart(update)) => {
             tracing::info!("restarting into the installed update");
+            log.flush();
 
             match update.restart() {
                 Ok(()) => ExitCode::SUCCESS,
@@ -49,15 +70,13 @@ fn main() -> ExitCode {
 /// Run the agent on its own runtime. The runtime is dropped before this
 /// returns, which ends every task (and the crackers they started), so a restart
 /// begins from a settled process.
-fn run(cli: &Cli) -> Result<Exit<PendingRestart>> {
+fn run(cli: &Cli, config: Config) -> Result<Exit<PendingRestart>> {
     let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
 
-    runtime.block_on(run_agent(cli))
+    runtime.block_on(run_agent(cli, config))
 }
 
-async fn run_agent(cli: &Cli) -> Result<Exit<PendingRestart>> {
-    let config = Config::load(&cli.config, &cli.state, cli.overrides())?;
-
+async fn run_agent(cli: &Cli, config: Config) -> Result<Exit<PendingRestart>> {
     let url = config.require_url()?;
     let http = HttpSettings::from_server(&config.settings().server)?;
 

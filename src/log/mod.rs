@@ -1,10 +1,23 @@
 //! Logging for the agent: subscriber setup plus the self-rendering field types
 //! that give the log its shape.
 
+mod file;
+
+pub use file::LogGuard;
+
 use std::fmt;
+use std::io;
 use std::path::Path;
 
-use tracing_subscriber::EnvFilter;
+use tracing::Subscriber;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
+
+use crate::config::LogFileConfig;
+
+use file::{BackgroundWriter, RotatingFile};
 
 /// How verbose the agent's own logging should be when `RUST_LOG` is unset.
 #[derive(Debug, Clone, Copy)]
@@ -14,20 +27,67 @@ pub enum Verbosity {
     Trace,
 }
 
-/// Install the tracing subscriber.
+/// Install the tracing subscriber: the console always, plus `file` when one is
+/// configured. Keep the returned guard alive until the end: dropping it waits
+/// for the last lines to reach the file.
 ///
 /// With no `RUST_LOG` the filter keeps the agent's own output in the foreground
 /// and dependency chatter (hyper, reqwest, rustls, h2, ...) in the background,
 /// even in debug or trace mode. An explicit `RUST_LOG` takes full control, and
-/// an empty `RUST_LOG` is the "log absolutely everything" escape hatch.
-pub fn init(verbosity: Verbosity) {
+/// an empty `RUST_LOG` is the "log absolutely everything" escape hatch. The
+/// filter applies to the console and the file alike.
+///
+/// If the log file cannot be opened, console logging is still installed so the
+/// caller can report the error.
+pub fn init(verbosity: Verbosity, file: Option<&LogFileConfig>) -> io::Result<LogGuard> {
     let filter = match std::env::var("RUST_LOG") {
         Ok(value) if !value.trim().is_empty() => EnvFilter::new(value),
         Ok(_) => EnvFilter::new("trace"),
         Err(_) => EnvFilter::new(default_filter(verbosity)),
     };
 
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let opened = file.map(open_file).transpose();
+
+    let (writer, guard, error) = match opened {
+        Ok(Some((writer, guard))) => (Some(writer), guard, None),
+        Ok(None) => (None, LogGuard::console_only(), None),
+        Err(error) => (None, LogGuard::console_only(), Some(error)),
+    };
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(writer.map(file_layer))
+        .init();
+
+    match error {
+        Some(error) => Err(error),
+        None => Ok(guard),
+    }
+}
+
+fn open_file(config: &LogFileConfig) -> io::Result<(BackgroundWriter, LogGuard)> {
+    RotatingFile::open(
+        &config.file,
+        config.max_size.bytes(),
+        config.max_files.get(),
+    )
+    .and_then(file::spawn)
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("opening log file {}: {error}", config.file.display()),
+        )
+    })
+}
+
+fn file_layer<S>(writer: BackgroundWriter) -> impl Layer<S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
 }
 
 /// The default log filter when `RUST_LOG` is unset: the agent's own crate at the
@@ -143,6 +203,28 @@ impl fmt::Display for Keyspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    #[test]
+    fn the_log_file_gets_each_event_without_colour_codes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("agent.log");
+        let (writer, guard) = file::spawn(RotatingFile::open(&path, 1 << 20, 5).unwrap()).unwrap();
+        let subscriber = tracing_subscriber::registry().with(file_layer(writer));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(task_id = 7, "chunk failed");
+        });
+        guard.flush();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("WARN"), "{text:?}");
+        assert!(text.contains("chunk failed task_id=7"), "{text:?}");
+        assert!(!text.contains('\x1b'), "{text:?}");
+    }
 
     #[test]
     fn hash_rate_scales_to_a_sensible_unit() {
