@@ -194,7 +194,7 @@ pub struct CrackerConfig {
 }
 
 /// Writing the log to a file as well as the console. Once the file would grow
-/// past `max_size` it is rotated, keeping `max_files` old ones.
+/// past `max_size` it is rotated and compressed, keeping `max_files` old ones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogFileConfig {
