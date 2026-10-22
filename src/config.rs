@@ -5,7 +5,9 @@
 use std::fmt;
 use std::fs;
 use std::io;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +50,11 @@ pub enum ConfigError {
         path.display()
     )]
     MissingVoucher { path: PathBuf },
+    #[error(
+        "--log-max-size and --log-max-files need a log file: set log.file in {} or pass --log-file",
+        path.display()
+    )]
+    LogLimitsWithoutFile { path: PathBuf },
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +193,124 @@ pub struct CrackerConfig {
     pub hashcat_path: Option<PathBuf>,
 }
 
+/// Writing the log to a file as well as the console. Once the file would grow
+/// past `max_size` it is rotated and compressed, keeping `max_files` old ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogFileConfig {
+    pub file: PathBuf,
+    #[serde(default = "LogFileConfig::default_max_size")]
+    pub max_size: ByteSize,
+    #[serde(default = "LogFileConfig::default_max_files")]
+    pub max_files: NonZeroUsize,
+}
+
+impl LogFileConfig {
+    fn new(file: PathBuf) -> Self {
+        Self {
+            file,
+            max_size: Self::default_max_size(),
+            max_files: Self::default_max_files(),
+        }
+    }
+
+    fn default_max_size() -> ByteSize {
+        ByteSize(NonZeroU64::new(10 << 20).expect("non-zero"))
+    }
+
+    fn default_max_files() -> NonZeroUsize {
+        NonZeroUsize::new(5).expect("non-zero")
+    }
+}
+
+/// A size in bytes, written as a plain byte count or with a binary unit:
+/// `500KB`, `10MB`, `1GB`. Never zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ByteSizeRepr", into = "String")]
+pub struct ByteSize(NonZeroU64);
+
+impl ByteSize {
+    const UNITS: [(&str, u64); 3] = [("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)];
+
+    pub fn bytes(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl FromStr for ByteSize {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid =
+            || format!("invalid size {text:?}: expected e.g. 10MB, 500KB, 1GB or a byte count");
+
+        let trimmed = text.trim();
+        let digits = trimmed
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(trimmed.len());
+        let (number, unit) = trimmed.split_at(digits);
+        let unit = unit.trim().to_ascii_uppercase();
+
+        let multiplier = match unit.as_str() {
+            "" | "B" => 1,
+            unit => Self::UNITS
+                .iter()
+                .find(|(name, _)| *name == unit)
+                .map(|(_, multiplier)| *multiplier)
+                .ok_or_else(invalid)?,
+        };
+
+        number
+            .parse::<u64>()
+            .ok()
+            .and_then(|number| number.checked_mul(multiplier))
+            .and_then(NonZeroU64::new)
+            .map(Self)
+            .ok_or_else(invalid)
+    }
+}
+
+impl fmt::Display for ByteSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bytes = self.bytes();
+
+        match Self::UNITS
+            .iter()
+            .find(|(_, size)| bytes.is_multiple_of(*size))
+        {
+            Some((unit, size)) => write!(f, "{}{unit}", bytes / size),
+            None => write!(f, "{bytes}"),
+        }
+    }
+}
+
+/// The config file may give a size as text (`"10MB"`) or as a byte count.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ByteSizeRepr {
+    Bytes(u64),
+    Text(String),
+}
+
+impl TryFrom<ByteSizeRepr> for ByteSize {
+    type Error = String;
+
+    fn try_from(repr: ByteSizeRepr) -> Result<Self, Self::Error> {
+        match repr {
+            ByteSizeRepr::Bytes(bytes) => NonZeroU64::new(bytes)
+                .map(Self)
+                .ok_or_else(|| "size must be greater than zero".to_string()),
+            ByteSizeRepr::Text(text) => text.parse(),
+        }
+    }
+}
+
+impl From<ByteSize> for String {
+    fn from(size: ByteSize) -> Self {
+        size.to_string()
+    }
+}
+
 /// User-owned; never written by the agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -195,6 +320,7 @@ pub struct Settings {
     pub paths: Paths,
     pub behavior: Behavior,
     pub cracker: CrackerConfig,
+    pub log: Option<LogFileConfig>,
 }
 
 /// Agent-owned; what the agent must remember across restarts.
@@ -226,10 +352,13 @@ pub struct Overrides {
     pub preprocessors_path: Option<PathBuf>,
     pub zaps_path: Option<PathBuf>,
     pub hashcat_path: Option<PathBuf>,
+    pub log_file: Option<PathBuf>,
+    pub log_max_size: Option<ByteSize>,
+    pub log_max_files: Option<NonZeroUsize>,
 }
 
 impl Overrides {
-    fn apply(self, settings: &mut Settings) {
+    fn apply(self, settings: &mut Settings, settings_path: &Path) -> Result<(), ConfigError> {
         if self.hashcat_path.is_some() {
             settings.cracker.hashcat_path = self.hashcat_path;
         }
@@ -283,6 +412,32 @@ impl Overrides {
                 *target = path;
             }
         }
+
+        if let Some(file) = self.log_file {
+            match &mut settings.log {
+                Some(log) => log.file = file,
+                None => settings.log = Some(LogFileConfig::new(file)),
+            }
+        }
+
+        if self.log_max_size.is_some() || self.log_max_files.is_some() {
+            let log = settings
+                .log
+                .as_mut()
+                .ok_or_else(|| ConfigError::LogLimitsWithoutFile {
+                    path: settings_path.to_path_buf(),
+                })?;
+
+            if let Some(max_size) = self.log_max_size {
+                log.max_size = max_size;
+            }
+
+            if let Some(max_files) = self.log_max_files {
+                log.max_files = max_files;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -307,7 +462,7 @@ impl Config {
         let state_path = state_path.into();
 
         let mut settings = read_settings(&settings_path)?;
-        overrides.apply(&mut settings);
+        overrides.apply(&mut settings, &settings_path)?;
 
         let state = read_state(&state_path)?;
 
@@ -521,6 +676,11 @@ mod tests {
             cracker: CrackerConfig {
                 hashcat_path: Some(PathBuf::from("/opt/homebrew/bin/hashcat")),
             },
+            log: Some(LogFileConfig {
+                file: PathBuf::from("/var/log/htp-agent.log"),
+                max_size: "500KB".parse().unwrap(),
+                max_files: NonZeroUsize::new(3).unwrap(),
+            }),
         };
 
         let encoded = serde_json::to_string_pretty(&settings).unwrap();
@@ -817,5 +977,138 @@ mod tests {
         assert!(debug.contains("agent"), "{debug}");
         assert!(!debug.contains("secret"), "{debug}");
         assert!(!debug.contains("hunter2"), "{debug}");
+    }
+
+    #[test]
+    fn byte_sizes_take_a_binary_unit_or_a_plain_byte_count() {
+        for (text, bytes) in [
+            ("4096", 4096),
+            ("500KB", 512_000),
+            ("10MB", 10_485_760),
+            ("1GB", 1_073_741_824),
+            ("10 mb", 10_485_760),
+            ("2b", 2),
+        ] {
+            assert_eq!(text.parse::<ByteSize>().unwrap().bytes(), bytes, "{text}");
+        }
+    }
+
+    #[test]
+    fn byte_sizes_reject_zero_unknown_units_and_garbage() {
+        for text in ["", "0", "0MB", "MB", "10XB", "-1", "1.5MB", "99999999999GB"] {
+            assert!(
+                text.parse::<ByteSize>().is_err(),
+                "{text} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_log_file_without_limits_rotates_at_10mb_and_keeps_5_files() {
+        let fixture = Fixture::new();
+        fixture.write_settings(r#"{ "log": { "file": "agent.log" } }"#);
+
+        let config = fixture.load(Overrides::default()).unwrap();
+
+        let log = config.settings().log.as_ref().unwrap();
+        assert_eq!(log.file, PathBuf::from("agent.log"));
+        assert_eq!(log.max_size.bytes(), 10_485_760);
+        assert_eq!(log.max_files.get(), 5);
+    }
+
+    #[test]
+    fn the_log_size_is_read_as_text_or_as_a_byte_count() {
+        for (max_size, bytes) in [(r#""500KB""#, 512_000), ("2048", 2048)] {
+            let fixture = Fixture::new();
+            fixture.write_settings(&format!(
+                r#"{{ "log": {{ "file": "agent.log", "max_size": {max_size}, "max_files": 3 }} }}"#
+            ));
+
+            let config = fixture.load(Overrides::default()).unwrap();
+
+            let log = config.settings().log.as_ref().unwrap();
+            assert_eq!(log.max_size.bytes(), bytes, "{max_size}");
+            assert_eq!(log.max_files.get(), 3);
+        }
+    }
+
+    #[test]
+    fn invalid_log_limits_in_the_file_are_rejected() {
+        for log in [
+            r#"{ "file": "agent.log", "max_files": 0 }"#,
+            r#"{ "file": "agent.log", "max_size": "10XB" }"#,
+            r#"{ "file": "agent.log", "max_size": 0 }"#,
+            r#"{ "max_size": "10MB" }"#,
+        ] {
+            let fixture = Fixture::new();
+            fixture.write_settings(&format!(r#"{{ "log": {log} }}"#));
+
+            let error = fixture.load(Overrides::default()).unwrap_err();
+
+            assert!(
+                matches!(error, ConfigError::Json { .. }),
+                "{log}: expected a JSON error, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn log_overrides_win_over_the_file() {
+        let fixture = Fixture::new();
+        fixture.write_settings(
+            r#"{ "log": { "file": "from-file.log", "max_size": "1MB", "max_files": 2 } }"#,
+        );
+
+        let config = fixture
+            .load(Overrides {
+                log_file: Some(PathBuf::from("from-cli.log")),
+                log_max_size: Some("20MB".parse().unwrap()),
+                log_max_files: Some(NonZeroUsize::new(9).unwrap()),
+                ..Overrides::default()
+            })
+            .unwrap();
+
+        let log = config.settings().log.as_ref().unwrap();
+        assert_eq!(log.file, PathBuf::from("from-cli.log"));
+        assert_eq!(log.max_size.bytes(), 20_971_520);
+        assert_eq!(log.max_files.get(), 9);
+    }
+
+    #[test]
+    fn a_log_file_flag_alone_turns_on_file_logging_with_the_defaults() {
+        let fixture = Fixture::new();
+
+        let config = fixture
+            .load(Overrides {
+                log_file: Some(PathBuf::from("agent.log")),
+                ..Overrides::default()
+            })
+            .unwrap();
+
+        let log = config.settings().log.as_ref().unwrap();
+        assert_eq!(log.file, PathBuf::from("agent.log"));
+        assert_eq!(log.max_size.bytes(), 10_485_760);
+        assert_eq!(log.max_files.get(), 5);
+    }
+
+    #[test]
+    fn log_limit_flags_without_a_log_file_are_rejected() {
+        let fixture = Fixture::new();
+
+        let error = fixture
+            .load(Overrides {
+                log_max_files: Some(NonZeroUsize::new(3).unwrap()),
+                ..Overrides::default()
+            })
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            matches!(error, ConfigError::LogLimitsWithoutFile { .. }),
+            "{error:?}"
+        );
+        assert!(message.contains("log.file"), "{message}");
+        assert!(message.contains("--log-file"), "{message}");
+        assert!(message.contains(DEFAULT_SETTINGS_FILE), "{message}");
     }
 }

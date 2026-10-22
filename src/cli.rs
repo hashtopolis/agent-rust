@@ -1,8 +1,9 @@
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::config::{DEFAULT_SETTINGS_FILE, DEFAULT_STATE_FILE, Overrides};
+use crate::config::{ByteSize, DEFAULT_SETTINGS_FILE, DEFAULT_STATE_FILE, Overrides};
 
 // No `Debug`: `--proxy` may carry credentials.
 #[derive(Parser)]
@@ -76,6 +77,19 @@ pub struct Cli {
     /// Enable trace logging, including full request/response bodies.
     #[arg(long)]
     pub trace: bool,
+
+    /// Also write the log to this file, rotated and gzip-compressed by size.
+    #[arg(long)]
+    pub log_file: Option<PathBuf>,
+
+    /// Rotate the log file before it grows past this size, e.g. 500KB, 10MB
+    /// (the default) or 1GB.
+    #[arg(long)]
+    pub log_max_size: Option<ByteSize>,
+
+    /// How many rotated log files to keep (default 5).
+    #[arg(long)]
+    pub log_max_files: Option<NonZeroUsize>,
 }
 
 impl Cli {
@@ -101,6 +115,9 @@ impl Cli {
             preprocessors_path: self.preprocessors_path.clone(),
             zaps_path: self.zaps_path.clone(),
             hashcat_path: self.hashcat_path.clone(),
+            log_file: self.log_file.clone(),
+            log_max_size: self.log_max_size,
+            log_max_files: self.log_max_files,
         }
     }
 }
