@@ -54,6 +54,9 @@ pub trait Provisioner<T: Transport> {
     /// the loop a fake cracker, keeping chunk dispatch testable.
     type Cracker: Cracker;
 
+    /// An installed update to restart into; see `check_client_version`.
+    type Restart;
+
     async fn deletion_check(&self, client: &Client<T>) -> Result<(), ProvisionError>;
 
     async fn ensure_cracker(
@@ -88,7 +91,13 @@ pub trait Provisioner<T: Transport> {
         dest: &Path,
     ) -> Result<(), ProvisionError>;
 
-    async fn check_client_version(&self, client: &Client<T>) -> Result<(), ProvisionError>;
+    /// `Some` once an update is installed: the agent should wind down and
+    /// restart into it. Returning it rather than restarting in place lets the
+    /// caller clean up first, and lets a fake provisioner hand the loop a fake.
+    async fn check_client_version(
+        &self,
+        client: &Client<T>,
+    ) -> Result<Option<Self::Restart>, ProvisionError>;
 }
 
 pub struct DiskProvisioner<D: Downloader> {
@@ -223,6 +232,7 @@ async fn resolve_local_hashcat(path: &Path, announced: &str) -> Option<PathBuf> 
 
 impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
     type Cracker = AnyCracker;
+    type Restart = update::PendingRestart;
 
     async fn deletion_check(&self, client: &Client<T>) -> Result<(), ProvisionError> {
         let status = client.get_file_status().await?;
@@ -456,7 +466,10 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
         Ok(())
     }
 
-    async fn check_client_version(&self, client: &Client<T>) -> Result<(), ProvisionError> {
+    async fn check_client_version(
+        &self,
+        client: &Client<T>,
+    ) -> Result<Option<update::PendingRestart>, ProvisionError> {
         tracing::debug!("checking for client update");
 
         match client
@@ -464,20 +477,25 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
             .await?
         {
             CheckClientVersionResponse::UpToDate => {
-                tracing::debug!("client version is up to date")
+                tracing::debug!("client version is up to date");
+
+                Ok(None)
             }
             CheckClientVersionResponse::NewVersion { url } => {
                 tracing::info!(%url, "new client version available; updating");
 
-                // On success the process re-execs and never returns here; a
-                // failure must not stop the agent, so it is logged and swallowed.
-                if let Err(error) = update::apply(&self.downloader, &url).await {
-                    tracing::error!(%error, "self-update failed");
+                // A failure must not stop the agent, so it is logged and
+                // swallowed.
+                match update::apply(&self.downloader, &url).await {
+                    Ok(restart) => Ok(restart),
+                    Err(error) => {
+                        tracing::error!(%error, "self-update failed");
+
+                        Ok(None)
+                    }
                 }
             }
         }
-
-        Ok(())
     }
 }
 

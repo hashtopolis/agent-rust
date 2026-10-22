@@ -1,16 +1,18 @@
 //! Self-update: fetch the bundle, install the binary for this build's target,
-//! and re-exec.
+//! and hand back a [`PendingRestart`] for the caller to restart into it.
 //!
 //! The server serves one `rust-agent.zip` for the `rust` type, holding a binary
 //! per target plus a `manifest.json` (see `scripts/bundle.sh`). Delivery is not
 //! per-OS, so the agent picks its binary by matching [`agent_target`] against
 //! each entry's `triples`.
 //!
-//! After installation, [`apply`] replaces the process image.
+//! [`apply`] installs but does not restart: the caller first winds the process
+//! down (ending tasks, flushing the log), then calls [`PendingRestart::restart`].
 //! A staged binary must pass a version probe before installation. Replacement or
 //! restart failures restore the previous executable; rollback failures are reported
 //! separately. Crashes after a successful restart require external supervision.
 
+use std::fmt;
 use std::fs;
 use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -86,9 +88,12 @@ struct BinaryEntry {
     triples: Vec<String>,
 }
 
-/// Download the bundle at `url`, validate and install this target's binary,
-/// and re-exec. Returns without restarting when the version already matches.
-pub async fn apply<D: Downloader>(downloader: &D, url: &str) -> Result<(), UpdateError> {
+/// Download the bundle at `url`, then validate and install this target's
+/// binary. Returns `None` when the bundle matches the running version.
+pub async fn apply<D: Downloader>(
+    downloader: &D,
+    url: &str,
+) -> Result<Option<PendingRestart>, UpdateError> {
     let current_exe = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(UpdateError::CurrentExe)?;
@@ -121,7 +126,7 @@ pub async fn apply<D: Downloader>(downloader: &D, url: &str) -> Result<(), Updat
     let Some(prepared) = prepared else {
         tracing::warn!("update bundle matches the running version; not restarting");
 
-        return Ok(());
+        return Ok(None);
     };
 
     validate_binary(&prepared.path, &prepared.version, PROBE_TIMEOUT).await?;
@@ -131,18 +136,58 @@ pub async fn apply<D: Downloader>(downloader: &D, url: &str) -> Result<(), Updat
     let error_path = current_exe.clone();
 
     tokio::task::spawn_blocking(move || {
-        replace_and_restart(
-            &current_exe,
-            prepared,
-            |path| self_replace::self_replace(path),
-            restart,
-        )
+        install(&current_exe, prepared, |path| {
+            self_replace::self_replace(path)
+        })
     })
     .await
     .map_err(|source| UpdateError::Io {
         path: error_path,
         source: io::Error::other(source),
     })?
+    .map(Some)
+}
+
+/// An installed update the agent has yet to restart into. It holds a copy of
+/// the previous executable, so a failed restart can still be rolled back.
+#[must_use = "the update only takes effect once the agent restarts into it"]
+pub struct PendingRestart {
+    current_exe: PathBuf,
+    backup: fs::File,
+    permissions: fs::Permissions,
+}
+
+impl fmt::Debug for PendingRestart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingRestart")
+            .field("current_exe", &self.current_exe)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PendingRestart {
+    /// Start the updated binary with the original arguments. On unix the
+    /// process image is replaced, so this returns only on failure; on Windows
+    /// the new process is spawned and the caller should exit. A failure
+    /// restores the previous executable.
+    pub fn restart(self) -> Result<(), UpdateError> {
+        self.restart_with(restart)
+    }
+
+    fn restart_with(
+        mut self,
+        restart: impl FnOnce(&Path) -> Result<(), UpdateError>,
+    ) -> Result<(), UpdateError> {
+        match restart(&self.current_exe) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(roll_back(
+                &self.current_exe,
+                &mut self.backup,
+                self.permissions,
+                error,
+            )),
+        }
+    }
 }
 
 /// Result of staging the bundle.
@@ -230,12 +275,11 @@ async fn validate_binary(path: &Path, version: &str, timeout: Duration) -> Resul
 /// Back up before the swap, and restore to the recorded installation path on any
 /// returned error. Windows self-replacement can relocate the running executable,
 /// so resolving current_exe again (or calling self_replace for rollback) is unsafe.
-fn replace_and_restart(
+fn install(
     current_exe: &Path,
     prepared: PreparedUpdate,
     replace: impl FnOnce(&Path) -> io::Result<()>,
-    restart: impl FnOnce(&Path) -> Result<(), UpdateError>,
-) -> Result<(), UpdateError> {
+) -> Result<PendingRestart, UpdateError> {
     let exe_dir = current_exe.parent().unwrap_or_else(|| Path::new("."));
     let mut original = fs::File::open(current_exe).map_err(io_at(current_exe))?;
     let permissions = original
@@ -254,22 +298,35 @@ fn replace_and_restart(
     let installed = replace(&prepared.path).map_err(UpdateError::Replace);
     drop(prepared.directory);
 
-    let result = installed.and_then(|()| restart(current_exe));
-
-    if let Err(original) = result {
-        if let Err(source) = restore_backup(current_exe, &mut backup, permissions) {
-            return Err(UpdateError::Rollback {
-                original: Box::new(original),
-                source,
-            });
-        }
-
-        tracing::warn!("restored the previous executable after failed update");
-
-        return Err(original);
+    if let Err(error) = installed {
+        return Err(roll_back(current_exe, &mut backup, permissions, error));
     }
 
-    Ok(())
+    Ok(PendingRestart {
+        current_exe: current_exe.to_path_buf(),
+        backup,
+        permissions,
+    })
+}
+
+/// Restore the previous executable after `original` failed the update, and
+/// return the error to report.
+fn roll_back(
+    current_exe: &Path,
+    backup: &mut fs::File,
+    permissions: fs::Permissions,
+    original: UpdateError,
+) -> UpdateError {
+    if let Err(source) = restore_backup(current_exe, backup, permissions) {
+        return UpdateError::Rollback {
+            original: Box::new(original),
+            source,
+        };
+    }
+
+    tracing::warn!("restored the previous executable after failed update");
+
+    original
 }
 
 fn restore_backup(
@@ -383,8 +440,8 @@ fn set_executable(path: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 
-/// Re-exec the updated binary with the original arguments. Does not return on
-/// success.
+/// Start the updated binary with the original arguments: exec in place on unix
+/// (returning only on failure), spawn it on Windows.
 fn restart(current_exe: &Path) -> Result<(), UpdateError> {
     let args = std::env::args_os().skip(1);
 
@@ -400,12 +457,13 @@ fn restart(current_exe: &Path) -> Result<(), UpdateError> {
 
     #[cfg(not(unix))]
     {
-        // Windows cannot exec in place: spawn the new binary and exit.
+        // Windows cannot exec in place: spawn the new binary; the caller exits.
         Command::new(current_exe)
             .args(args)
             .spawn()
             .map_err(UpdateError::ReExec)?;
-        std::process::exit(0);
+
+        Ok(())
     }
 }
 
@@ -750,26 +808,62 @@ mod tests {
                 .unwrap();
             let stage_dir = prepared.directory.path().to_owned();
 
-            let error = replace_and_restart(
-                &exe,
-                prepared,
-                |_| {
-                    if relocate_first {
-                        // self-replace can move the old Windows executable
-                        // before a later copy or rename fails.
-                        fs::rename(&exe, tmp.path().join("relocated"))?;
-                    }
+            let error = install(&exe, prepared, |_| {
+                if relocate_first {
+                    // self-replace can move the old Windows executable
+                    // before a later copy or rename fails.
+                    fs::rename(&exe, tmp.path().join("relocated"))?;
+                }
 
-                    Err(io::Error::other("replacement failed"))
-                },
-                |_| panic!("must not restart after a failed replacement"),
-            )
+                Err(io::Error::other("replacement failed"))
+            })
             .unwrap_err();
 
             assert!(matches!(error, UpdateError::Replace(_)));
             assert_eq!(fs::read(&exe).unwrap(), b"previous executable");
             assert!(!stage_dir.exists());
         }
+    }
+
+    /// Install the linux placeholder binary over an `agent` file in `dir`.
+    fn installed_update(dir: &Path) -> (PathBuf, PendingRestart) {
+        let exe = dir.join("agent");
+        fs::write(&exe, b"previous executable").unwrap();
+
+        let zip = build_bundle(dir, &newer_version());
+        let prepared = prepare_from_zip(&zip, dir, "x86_64-unknown-linux-musl")
+            .unwrap()
+            .unwrap();
+
+        let pending = install(&exe, prepared, |staged| fs::copy(staged, &exe).map(|_| ())).unwrap();
+
+        (exe, pending)
+    }
+
+    #[test]
+    fn installing_leaves_the_restart_to_the_caller() {
+        let tmp = TempDir::new().unwrap();
+
+        let (exe, pending) = installed_update(tmp.path());
+
+        assert_eq!(fs::read(&exe).unwrap(), b"linux-binary");
+
+        drop(pending);
+
+        assert_eq!(fs::read(&exe).unwrap(), b"linux-binary");
+    }
+
+    #[test]
+    fn a_failed_restart_restores_the_previous_executable() {
+        let tmp = TempDir::new().unwrap();
+        let (exe, pending) = installed_update(tmp.path());
+
+        let error = pending
+            .restart_with(|_| Err(UpdateError::ReExec(io::Error::other("exec failed"))))
+            .unwrap_err();
+
+        assert!(matches!(error, UpdateError::ReExec(_)));
+        assert_eq!(fs::read(&exe).unwrap(), b"previous executable");
     }
 
     #[cfg(unix)]
@@ -820,32 +914,46 @@ mod tests {
         let scenario = std::env::var("HTP_UPDATE_TEST_SCENARIO").unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
-        let result = if scenario == "restart-error" {
-            let prepared = prepare_from_zip(&root.join("bundle.zip"), &root, agent_target())
-                .unwrap()
-                .unwrap();
+        let downloader = CopyDownload(root.join("bundle.zip"));
 
-            runtime
-                .block_on(validate_binary(
-                    &prepared.path,
-                    &prepared.version,
-                    PROBE_TIMEOUT,
-                ))
-                .unwrap();
+        let result = match scenario.as_str() {
+            "restart-error" => {
+                let prepared = prepare_from_zip(&root.join("bundle.zip"), &root, agent_target())
+                    .unwrap()
+                    .unwrap();
 
-            replace_and_restart(
-                &exe,
-                prepared,
-                |path| self_replace::self_replace(path),
-                |path| {
-                    // Force an actual exec failure after self-replace succeeded.
-                    fs::remove_file(path).unwrap();
+                runtime
+                    .block_on(validate_binary(
+                        &prepared.path,
+                        &prepared.version,
+                        PROBE_TIMEOUT,
+                    ))
+                    .unwrap();
 
-                    restart(path)
-                },
-            )
-        } else {
-            runtime.block_on(apply(&CopyDownload(root.join("bundle.zip")), "unused"))
+                install(&exe, prepared, |path| self_replace::self_replace(path)).and_then(
+                    |pending| {
+                        pending.restart_with(|path| {
+                            // Force an actual exec failure after self-replace
+                            // succeeded.
+                            fs::remove_file(path).unwrap();
+
+                            restart(path)
+                        })
+                    },
+                )
+            }
+            "installed" => {
+                let result = runtime.block_on(apply(&downloader, "unused"));
+
+                // Returning instead of exec'ing proves the restart is left to
+                // the caller; the parent checks the binary was swapped.
+                assert!(matches!(result, Ok(Some(_))), "{result:?}");
+
+                return;
+            }
+            _ => runtime
+                .block_on(apply(&downloader, "unused"))
+                .and_then(|pending| pending.expect("the bundle is newer").restart()),
         };
 
         match scenario.as_str() {
@@ -870,7 +978,13 @@ mod tests {
         );
         let new_binary = new_binary.as_bytes();
 
-        for scenario in ["success", "invalid", "wrong-version", "restart-error"] {
+        for scenario in [
+            "success",
+            "installed",
+            "invalid",
+            "wrong-version",
+            "restart-error",
+        ] {
             let tmp = TempDir::new().unwrap();
             let exe = tmp.path().join("agent");
             fs::copy(&original, &exe).unwrap();
@@ -893,15 +1007,22 @@ mod tests {
 
             assert!(output.status.success(), "{scenario}: {output:?}");
 
-            if scenario == "success" {
-                assert_eq!(fs::read(&exe).unwrap(), new_binary);
-                assert_eq!(
-                    fs::read_to_string(marker).unwrap(),
-                    "--exact\nupdate::tests::update_child\n--nocapture\n"
-                );
-            } else {
-                assert_eq!(fs::read(&exe).unwrap(), fs::read(&original).unwrap());
-                assert!(!marker.exists());
+            match scenario {
+                "success" => {
+                    assert_eq!(fs::read(&exe).unwrap(), new_binary);
+                    assert_eq!(
+                        fs::read_to_string(&marker).unwrap(),
+                        "--exact\nupdate::tests::update_child\n--nocapture\n"
+                    );
+                }
+                "installed" => {
+                    assert_eq!(fs::read(&exe).unwrap(), new_binary);
+                    assert!(!marker.exists());
+                }
+                _ => {
+                    assert_eq!(fs::read(&exe).unwrap(), fs::read(&original).unwrap());
+                    assert!(!marker.exists());
+                }
             }
 
             let expected_files = if scenario == "success" { 3 } else { 2 };
