@@ -24,14 +24,16 @@ fn main() -> ExitCode {
     };
 
     // The log file is configured in the config file, so logging starts after
-    // loading it; a config error is still reported, on the console.
+    // loading it. If that fails, a log file given on the command line still
+    // records why.
     let config = Config::load(&cli.config, &cli.state, cli.overrides());
-    let log_file = config
-        .as_ref()
-        .ok()
-        .and_then(|config| config.settings().log.as_ref());
 
-    let log = match htp_agent::log::init(verbosity, log_file) {
+    let log_file = match &config {
+        Ok(config) => config.settings().log.clone(),
+        Err(_) => cli.log_file_from_flags(),
+    };
+
+    let log = match htp_agent::log::init(verbosity, log_file.as_ref()) {
         Ok(log) => log,
         Err(error) => {
             tracing::error!("agent exited: {error}");

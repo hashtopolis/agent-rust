@@ -206,7 +206,8 @@ pub struct LogFileConfig {
 }
 
 impl LogFileConfig {
-    fn new(file: PathBuf) -> Self {
+    /// `file` with the default size and count limits.
+    pub fn new(file: PathBuf) -> Self {
         Self {
             file,
             max_size: Self::default_max_size(),

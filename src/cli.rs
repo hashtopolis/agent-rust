@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::config::{ByteSize, DEFAULT_SETTINGS_FILE, DEFAULT_STATE_FILE, Overrides};
+use crate::config::{
+    ByteSize, DEFAULT_SETTINGS_FILE, DEFAULT_STATE_FILE, LogFileConfig, Overrides,
+};
 
 // No `Debug`: `--proxy` may carry credentials.
 #[derive(Parser)]
@@ -97,6 +99,22 @@ impl Cli {
         <Self as Parser>::parse()
     }
 
+    /// The log file as the flags alone describe it, for reporting why the
+    /// config file could not be loaded.
+    pub fn log_file_from_flags(&self) -> Option<LogFileConfig> {
+        let mut log = LogFileConfig::new(self.log_file.clone()?);
+
+        if let Some(max_size) = self.log_max_size {
+            log.max_size = max_size;
+        }
+
+        if let Some(max_files) = self.log_max_files {
+            log.max_files = max_files;
+        }
+
+        Some(log)
+    }
+
     pub fn overrides(&self) -> Overrides {
         Overrides {
             url: self.url.clone(),
@@ -119,5 +137,35 @@ impl Cli {
             log_max_size: self.log_max_size,
             log_max_files: self.log_max_files,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_file_flags_alone_describe_a_log_file() {
+        let cli = Cli::try_parse_from([
+            "htp-agent",
+            "--log-file",
+            "agent.log",
+            "--log-max-files",
+            "2",
+        ])
+        .unwrap();
+
+        let log = cli.log_file_from_flags().unwrap();
+
+        assert_eq!(log.file, PathBuf::from("agent.log"));
+        assert_eq!(log.max_files.get(), 2);
+        assert_eq!(log.max_size.bytes(), 10_485_760);
+    }
+
+    #[test]
+    fn without_a_log_file_flag_there_is_no_log_file() {
+        let cli = Cli::try_parse_from(["htp-agent", "--log-max-size", "1MB"]).unwrap();
+
+        assert_eq!(cli.log_file_from_flags(), None);
     }
 }
