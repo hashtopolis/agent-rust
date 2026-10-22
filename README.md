@@ -176,10 +176,11 @@ directory, and a missing directory is created.
 
 Before a line would take the file past `log.max_size` (default `10MB`; `KB`,
 `MB` and `GB` count in 1024s, a bare number is bytes), the agent moves it to
-`htp-agent.log.1` and starts a new one. Older files shift up to `.2` and so on,
-and only the newest `log.max_files` (default 5) are kept; older ones, say after
-lowering the limit, are deleted at startup. A line is never split between two
-files, and a restart keeps appending to the current file.
+`htp-agent.log.1.gz`, compressed, and starts a new one. Older files shift up to
+`.2.gz` and so on, and only the newest `log.max_files` (default 5) are kept;
+older ones, say after lowering the limit, are deleted at startup. A line is
+never split between two files, and a restart keeps appending to the current
+file.
 
 If a rotation fails, say because another program holds one of the files open
 on Windows, the agent warns on stderr, keeps writing to the current file and
