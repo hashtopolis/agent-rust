@@ -398,7 +398,6 @@ mod tests {
     use super::*;
 
     use std::io::Read;
-    use std::time::Duration;
 
     use flate2::read::GzDecoder;
     use tempfile::TempDir;
