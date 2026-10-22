@@ -561,6 +561,7 @@ dependencies = [
  "anyhow",
  "clap",
  "enum_dispatch",
+ "flate2",
  "gethostname",
  "libc",
  "pci-ids",

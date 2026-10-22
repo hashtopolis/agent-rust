@@ -35,7 +35,8 @@ impl Write for BackgroundWriter {
     }
 }
 
-/// Dropping it waits until every line logged so far is in the file.
+/// Dropping it waits until every line logged so far is in the file and the
+/// last rotation is compressed.
 pub struct LogGuard(Option<SyncSender<Message>>);
 
 impl LogGuard {
@@ -43,7 +44,8 @@ impl LogGuard {
         Self(None)
     }
 
-    /// Block until every line logged so far is in the file.
+    /// Block until every line logged so far is in the file and the last
+    /// rotation is compressed.
     pub fn flush(&self) {
         let Some(sender) = &self.0 else {
             return;
@@ -90,6 +92,7 @@ fn write_lines(mut file: RotatingFile, receiver: Receiver<Message>) {
                 }
             },
             Message::Flush(done) => {
+                file.wait_for_compression();
                 let _ = done.send(());
             }
         }
@@ -107,9 +110,13 @@ pub(super) struct TestLog {
 #[cfg(test)]
 impl TestLog {
     pub(super) fn new() -> Self {
+        Self::rotating_at(1 << 20)
+    }
+
+    pub(super) fn rotating_at(max_size: u64) -> Self {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("agent.log");
-        let (writer, guard) = spawn(RotatingFile::open(&path, 1 << 20, 5).unwrap()).unwrap();
+        let (writer, guard) = spawn(RotatingFile::open(&path, max_size, 5).unwrap()).unwrap();
 
         Self {
             path,
@@ -151,6 +158,18 @@ mod tests {
         log.guard.flush();
 
         assert_eq!(fs::read_to_string(&log.path).unwrap(), "before\nafter\n");
+    }
+
+    #[test]
+    fn flush_waits_for_the_last_rotation_to_be_compressed() {
+        let mut log = TestLog::rotating_at(10);
+
+        log.writer.write_all(b"12345\n").unwrap();
+        log.writer.write_all(b"abcdef\n").unwrap();
+        log.guard.flush();
+
+        assert!(log.path.with_added_extension("1.gz").exists());
+        assert!(!log.path.with_added_extension("1").exists());
     }
 
     #[test]
