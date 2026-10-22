@@ -1,5 +1,5 @@
-//! The thread that writes log lines to the file, so rotation never stalls the
-//! agent's own threads.
+//! The thread that writes log lines to the file, so rotation and compression
+//! never stall the agent's own threads.
 
 use std::io::{self, Write};
 use std::sync::mpsc::{self, SyncSender};
