@@ -48,7 +48,9 @@ src/
 
   log/
     mod.rs         # logging module list and re-exports
-    subscriber.rs  # tracing subscriber: Verbosity, default filter, RUST_LOG
+    subscriber.rs  # tracing subscriber: console and log file layers, Verbosity, RUST_LOG
+    file.rs        # RotatingFile: the log file, rotated by size
+    writer.rs      # the thread that writes the log file, LogGuard
     fields.rs      # self-rendering log fields: Invocation, HashRate, Percent, Keyspace
 
   model/
@@ -117,7 +119,11 @@ tests/
 - **config.rs** — typesafe config, no string-keyed lookups. Two files with distinct owners: `config.json` holds the user's settings and is **only ever read** by the agent (so it is safe to re-read every loop iteration, and hand edits survive); `state.json` is agent-owned and holds the token and uuid, rewritten atomically when either changes. CLI flags live in `Overrides`, applied over the settings on load and re-applied after every reload, and are never persisted back.
 - **sysinfo.rs** — OS and device inventory for registration / status reporting.
 - **process.rs** — spawning child processes, streaming stdio, reporting.
-- **log/**: logging. `subscriber.rs` installs the tracing subscriber and decides what is logged: the agent's own crate at the requested `Verbosity` with dependencies kept quieter, unless `RUST_LOG` takes over. `fields.rs` holds the field types that render themselves the way the log should read them: `Invocation` (a copy-pasteable command line), `HashRate`, `Percent` and `Keyspace`.
+- **log/**: logging to the console and, when the `log` config section names one, to a size-rotated file.
+  - **log/subscriber.rs**: installs the tracing subscriber: a console layer and an optional file layer without colour codes, each behind its own filter. The agent's own crate logs at the requested `Verbosity` with dependencies kept quieter, unless `RUST_LOG` takes over. `init` runs once the config is loaded, since that names the file, and returns the `LogGuard`.
+  - **log/file.rs**: `RotatingFile`. Before a line would take the file past `max_size` it moves to `.1`, older rotations shift up one and at most `max_files` are kept. A failed rotation is reported on stderr and retried later, while lines keep going to the live file.
+  - **log/writer.rs**: the thread that owns the file. The agent's own threads only queue their lines, so a rotation holds them up only once the queue is full. Dropping the `LogGuard`, or calling `flush` before a self-update restart, waits until every queued line is written.
+  - **log/fields.rs**: the field types that render themselves the way the log should read them: `Invocation` (a copy-pasteable command line), `HashRate`, `Percent` and `Keyspace`.
 - **update.rs**: self-update. On a `checkClientVersion` "NEW" reply the agent downloads the server's `rust-agent.zip`, reads `manifest.json`, picks the binary whose `triples` include this build's `agent_target()` and swaps the running executable (`self-replace`). It does not restart in place: the installed update travels back as a `PendingRestart` through the provisioner and the loop to `main`, which drops the runtime first and then re-execs (on Windows, spawns the new binary and exits). The check runs at the end of bootstrap, so an idle agent updates on restart, and in the loop once per task pickup and after each successful chunk. A failed check or install is logged and never stops the agent. A failed restart restores the previous executable and ends the agent, because its loop has already wound down by then. Opt-out via `behavior.disable_update`. Integrity rests on the TLS download: the endpoint carries no hash, so there is no signature check yet.
 
 ## Open questions / notes
