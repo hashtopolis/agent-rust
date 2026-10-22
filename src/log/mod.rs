@@ -11,6 +11,7 @@ use std::path::Path;
 
 use tracing::Subscriber;
 use tracing::level_filters::LevelFilter;
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -46,9 +47,7 @@ pub fn init(verbosity: Verbosity, file: Option<&LogFileConfig>) -> io::Result<Lo
 
     let file_filter =
         file.map(|file| file_filter(verbosity, rust_log.as_deref(), file.level.as_ref()));
-    let file_traces = file_filter
-        .as_ref()
-        .is_some_and(|filter| filter.max_level_hint() == Some(LevelFilter::TRACE));
+    let file_traces = file_filter.as_ref().is_some_and(records_trace);
 
     let opened = file.map(open_file).transpose();
 
@@ -58,14 +57,7 @@ pub fn init(verbosity: Verbosity, file: Option<&LogFileConfig>) -> io::Result<Lo
         Err(error) => (None, LogGuard::console_only(), Some(error)),
     };
 
-    let file_layer = writer
-        .zip(file_filter)
-        .map(|(writer, filter)| file_layer(writer).with_filter(filter));
-
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(console_filter))
-        .with(file_layer)
-        .init();
+    subscriber(io::stdout, console_filter, writer.zip(file_filter)).init();
 
     if file_traces && error.is_none() {
         tracing::warn!(
@@ -77,6 +69,32 @@ pub fn init(verbosity: Verbosity, file: Option<&LogFileConfig>) -> io::Result<Lo
         Some(error) => Err(error),
         None => Ok(guard),
     }
+}
+
+/// The console layer and, when there is a file, the file layer. The file layer
+/// goes first: both share a span's rendered fields, and whichever renders them
+/// first decides whether they carry colour codes.
+fn subscriber<W>(
+    console: W,
+    console_filter: EnvFilter,
+    file: Option<(BackgroundWriter, EnvFilter)>,
+) -> impl Subscriber + Send + Sync
+where
+    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
+{
+    let file_layer = file.map(|(writer, filter)| file_layer(writer).with_filter(filter));
+
+    tracing_subscriber::registry().with(file_layer).with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(console)
+            .with_filter(console_filter),
+    )
+}
+
+/// Whether `filter` lets trace output through, which carries full request and
+/// response bodies with the agent token.
+fn records_trace(filter: &EnvFilter) -> bool {
+    filter.max_level_hint() == Some(LevelFilter::TRACE)
 }
 
 fn open_file(config: &LogFileConfig) -> io::Result<(BackgroundWriter, LogGuard)> {
@@ -297,6 +315,16 @@ mod tests {
     }
 
     #[test]
+    fn debug_and_normal_files_get_the_agent_at_that_level() {
+        let debug = logged_to_file(Verbosity::Trace, None, Some("debug"));
+        let normal = logged_to_file(Verbosity::Trace, None, Some("normal"));
+
+        assert!(debug.contains("agent debug"), "{debug}");
+        assert!(!debug.contains("agent trace"), "{debug}");
+        assert!(!normal.contains("agent debug"), "{normal}");
+    }
+
+    #[test]
     fn a_trace_file_gets_the_agents_trace_but_keeps_dependencies_quieter() {
         let text = logged_to_file(Verbosity::Normal, Some("hyper=trace"), Some("trace"));
 
@@ -311,6 +339,34 @@ mod tests {
 
         assert!(text.contains("dependency trace"), "{text}");
         assert!(!text.contains("agent debug"), "{text}");
+    }
+
+    #[test]
+    fn span_fields_reach_the_file_without_colour_codes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("agent.log");
+        let (writer, guard) = file::spawn(RotatingFile::open(&path, 1 << 20, 5).unwrap()).unwrap();
+        let subscriber = subscriber(
+            io::sink,
+            EnvFilter::new("trace"),
+            Some((writer, EnvFilter::new("trace"))),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let _span = tracing::info_span!("connection", peer = "client").entered();
+            tracing::info!("handshake");
+        });
+        guard.flush();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("handshake"), "{text:?}");
+        assert!(!text.contains('\x1b'), "{text:?}");
+    }
+
+    #[test]
+    fn only_a_filter_that_lets_trace_through_records_trace() {
+        assert!(records_trace(&EnvFilter::new("info,htp_agent=trace")));
+        assert!(!records_trace(&EnvFilter::new("info,htp_agent=debug")));
     }
 
     #[test]

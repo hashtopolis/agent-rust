@@ -245,15 +245,19 @@ impl FromStr for LogLevel {
     type Err = String;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        match text.trim() {
+        let text = text.trim();
+
+        // Case-insensitive like the filter syntax, where `TRACE` would
+        // otherwise turn every dependency up to trace as well.
+        match text.to_ascii_lowercase().as_str() {
             "normal" => Ok(Self::Normal),
             "debug" => Ok(Self::Debug),
             "trace" => Ok(Self::Trace),
             "" => Err("empty log level: expected normal, debug, trace or a filter".to_string()),
-            filter => tracing_subscriber::EnvFilter::builder()
-                .parse(filter)
-                .map(|_| Self::Filter(filter.to_string()))
-                .map_err(|error| format!("invalid log filter {filter:?}: {error}")),
+            _ => tracing_subscriber::EnvFilter::builder()
+                .parse(text)
+                .map(|_| Self::Filter(text.to_string()))
+                .map_err(|error| format!("invalid log filter {text:?}: {error}")),
         }
     }
 }
@@ -494,8 +498,8 @@ impl Overrides {
                 log.max_files = max_files;
             }
 
-            if self.log_file_level.is_some() {
-                log.level = self.log_file_level;
+            if let Some(level) = self.log_file_level {
+                log.level = Some(level);
             }
         }
 
@@ -1191,6 +1195,8 @@ mod tests {
             ("normal", LogLevel::Normal),
             ("debug", LogLevel::Debug),
             ("trace", LogLevel::Trace),
+            ("TRACE", LogLevel::Trace),
+            (" Debug ", LogLevel::Debug),
             (
                 "htp_agent=trace,hyper=debug",
                 LogLevel::Filter("htp_agent=trace,hyper=debug".to_string()),
