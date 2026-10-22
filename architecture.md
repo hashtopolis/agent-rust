@@ -48,7 +48,7 @@ src/
 
   log/
     mod.rs         # logging module list and re-exports
-    subscriber.rs  # tracing subscriber: console and log file layers, Verbosity, RUST_LOG
+    subscriber.rs  # tracing subscriber: console and log file layers, their filters, RUST_LOG
     file.rs        # RotatingFile: the log file, rotated by size, rotations gzipped
     writer.rs      # the thread that writes the log file, LogGuard
     fields.rs      # self-rendering log fields: Invocation, HashRate, Percent, Keyspace
@@ -120,7 +120,7 @@ tests/
 - **sysinfo.rs** — OS and device inventory for registration / status reporting.
 - **process.rs** — spawning child processes, streaming stdio, reporting.
 - **log/**: logging to the console and, when the `log` config section names one, to a size-rotated file.
-  - **log/subscriber.rs**: installs the tracing subscriber: a console layer and an optional file layer without colour codes, each behind its own filter. The agent's own crate logs at the requested `Verbosity` with dependencies kept quieter, unless `RUST_LOG` takes over. `init` runs once the config is loaded, since that names the file, and returns the `LogGuard`.
+  - **log/subscriber.rs**: installs the tracing subscriber: a console layer and an optional file layer without colour codes, each behind its own filter. The agent's own crate logs at the requested `Verbosity` with dependencies kept quieter, unless `RUST_LOG` takes over. The file follows the console unless `log.level` gives it a level of its own, and a file that records trace output is announced with a warning, since trace can carry the agent token. `init` runs once the config is loaded, since that names the file, and returns the `LogGuard`.
   - **log/file.rs**: `RotatingFile`. Before a line would take the file past `max_size` it moves to `.1`, older rotations shift up one and at most `max_files` are kept. A failed rotation is reported on stderr and retried later, while lines keep going to the live file. `.1` is gzip-compressed on a thread of its own, through a temporary file so a crash never leaves a truncated `.gz`; a rotation whose compression failed stays plain and shifts along with the rest.
   - **log/writer.rs**: the thread that owns the file. The agent's own threads only queue their lines, so a rotation holds them up only once the queue is full. Dropping the `LogGuard`, or calling `flush` before a self-update restart, waits until every queued line is written and a running compression has finished.
   - **log/fields.rs**: the field types that render themselves the way the log should read them: `Invocation` (a copy-pasteable command line), `HashRate`, `Percent` and `Keyspace`.

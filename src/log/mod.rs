@@ -7,7 +7,7 @@ mod file;
 mod subscriber;
 mod writer;
 
-pub use subscriber::{Verbosity, init};
+pub use subscriber::init;
 pub use writer::LogGuard;
 
 pub(crate) use fields::{HashRate, Invocation, Keyspace, Percent};
