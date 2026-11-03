@@ -66,6 +66,12 @@ impl HashcatCracker {
 mod tests {
     use super::*;
 
+    /// Absolute on every platform: `/mnt/...` has no drive letter on Windows,
+    /// so `absolute` would prefix the current drive.
+    fn absolute_dir() -> PathBuf {
+        std::env::temp_dir().join("hccache")
+    }
+
     fn version(raw: &str) -> HashcatVersion {
         HashcatVersion::parse(raw).unwrap()
     }
@@ -77,7 +83,7 @@ mod tests {
 
     #[test]
     fn versions_before_the_option_get_no_cache_dir() {
-        let dir = Path::new("/mnt/hccache");
+        let dir = absolute_dir();
 
         for raw in [
             "6.2.6",
@@ -86,13 +92,13 @@ mod tests {
             "7.1.2-1-gdeadbee",
             "7.1.2-626-gc84986904",
         ] {
-            assert_eq!(supported_cache_dir(Some(dir), version(raw)), None, "{raw}");
+            assert_eq!(supported_cache_dir(Some(&dir), version(raw)), None, "{raw}");
         }
     }
 
     #[test]
     fn versions_with_the_option_keep_the_cache_dir() {
-        let dir = Path::new("/mnt/hccache");
+        let dir = absolute_dir();
 
         for raw in [
             "7.1.2-627-g6570a49f2",
@@ -103,8 +109,8 @@ mod tests {
             "10.0.0",
         ] {
             assert_eq!(
-                supported_cache_dir(Some(dir), version(raw)),
-                Some(PathBuf::from("/mnt/hccache")),
+                supported_cache_dir(Some(&dir), version(raw)),
+                Some(dir.clone()),
                 "{raw}"
             );
         }
