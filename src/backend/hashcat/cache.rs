@@ -159,6 +159,7 @@ mod tests {
     fn an_empty_cache_dir_counts_as_unset() {
         assert_eq!(
             supported_cache_dir(Some(Path::new("")), version("8.0.0")),
-            None);
+            None
+        );
     }
 }
