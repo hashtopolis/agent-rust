@@ -291,8 +291,8 @@ impl Overrides {
             }
         }
 
-        if let Some(cache_path) = &self.cache_path {
-            settings.paths.cache = Some(cache_path.clone());
+        if self.cache_path.is_some() {
+            settings.paths.cache = self.cache_path;
         }
     }
 }

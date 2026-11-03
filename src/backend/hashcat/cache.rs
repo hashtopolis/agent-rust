@@ -22,7 +22,8 @@ pub(super) fn supported_cache_dir(
     configured: Option<&Path>,
     version: HashcatVersion,
 ) -> Option<PathBuf> {
-    let configured = configured?;
+    let configured = configured.filter(|path| !path.as_os_str().is_empty())?;
+
 
     if version < CACHE_PATH_SINCE {
         tracing::warn!(
@@ -153,5 +154,10 @@ mod tests {
             cache_arg(Some(&dir)),
             Some(format!("--cache-path={}", path_arg(&dir)))
         );
+    }
+
+    #[test]
+    fn an_empty_cache_dir_counts_as_unset() {
+        assert_eq!(supported_cache_dir(Some(Path::new("")), version("8.0.0")), None);
     }
 }
