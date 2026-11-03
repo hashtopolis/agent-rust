@@ -106,7 +106,8 @@ A fuller one:
     "crackers": "crackers",
     "hashlists": "hashlists",
     "preprocessors": "preprocessors",
-    "zaps": "zaps"
+    "zaps": "zaps",
+    "cache": "/var/cache/hashcat"
   },
   "behavior": {
     "cpu_only": false,
@@ -129,12 +130,33 @@ kind:
 - `hashlists` - the hashlists to crack, plus their output files
 - `preprocessors` - preprocessor binaries (PRINCE and the like)
 - `zaps` - zap files, the already-cracked hashes the agent skips
+- `cache` - optional, where hashcat keeps its caches (see below)
 
 The python agent fixed these next to the binary. Here each one is relocatable
 on its own, so you can keep large wordlists on a separate volume, or point
 several agents on one host at a shared crackers directory. They default to
 these names under the working directory, and each has a CLI override
 (`--files-path`, `--crackers-path`, and so on).
+
+`paths.cache` (or `--cache-path`) is handed to hashcat as `--cache-path`. hashcat
+keeps a seek database per wordlist there, which is what makes the `--skip` of
+every chunk cheap, plus its compiled kernels. By default those live in the
+cracker directory, so they go cold after every cracker update. Seek databases
+are named after a hash of their wordlist, so agents sharing one location build
+each only once. It has no default; unset, hashcat keeps its own location.
+
+- Only hashcat builds that know the option get it: `7.1.2-627-g6570a49f2` and
+  later, and any release after 7.1.2. Older ones, including 7.1.2 itself, are
+  left alone, since hashcat stops on an option it does not know.
+- Use a local, writable directory. hashcat tolerates a read-only location for
+  the wordlist caches, but a failed kernel cache write aborts the run. To share
+  between agents, point `cache` at a local directory and mount or symlink only
+  its `cache/feeds/wordlist` to the share.
+- The agent creates the directory at startup. If that fails, or the directory
+  is missing when hashcat runs (a share that is down, say), the option is left
+  off and hashcat uses its own location. If it points at a mountpoint that is
+  down, startup creates an empty local directory there, so check the log.
+- It is never removed by the agent, since other agents may share it.
 
 `cracker.hashcat_path` is the macOS-only hashcat fallback and is ignored
 elsewhere. Official hashcat releases ship no macOS build, so the cracker archive
@@ -153,7 +175,7 @@ Common settings also have CLI flags, which win over the config file:
   `HTP_AUTH_PASSWORD` environment variable, so it never shows in the process
   list
 - `--hashcat-path`
-- per-directory overrides like `--files-path`
+- per-directory overrides like `--files-path` and `--cache-path`
 
 `--debug` (`-d`) turns on debug logging. `--trace` goes one step further and
 also logs full API request and response bodies, including the agent token, so

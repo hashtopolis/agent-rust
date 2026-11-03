@@ -41,6 +41,7 @@ async fn run_runtime(
         ])
         .args(cracker.resolve_attack(&task.attack_command, &task.hashlist_alias, Some(&hashlist)))
         .arg_if(preprocessor.is_some(), "example.dict")
+        .args(cracker.cache_arg())
         .args(argv::split_parameters(&task.cmd_parameters))
         .arg("-o")
         .arg(argv::path_arg(&cracker.hashlist_outfile(task.hashlist_id)))
@@ -98,6 +99,7 @@ async fn run_speed(
         // the pipe), so the benchmark stands one in from the cracker directory.
         // (example.dict is part of standard hashcat distribution)
         .arg_if(preprocessor.is_some(), "example.dict")
+        .args(cracker.cache_arg())
         .args(argv::split_parameters(&task.cmd_parameters))
         .arg_if(task.brain.is_some(), "-S")
         .arg("-o")

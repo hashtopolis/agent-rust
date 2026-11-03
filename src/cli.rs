@@ -64,6 +64,10 @@ pub struct Cli {
     pub preprocessors_path: Option<PathBuf>,
     #[arg(long)]
     pub zaps_path: Option<PathBuf>,
+    /// Directory hashcat keeps its wordlist seek databases and kernels in
+    /// (hashcat --cache-path). Only passed to hashcat builds that support it.
+    #[arg(long)]
+    pub cache_path: Option<PathBuf>,
 
     /// Deregister this agent from the server, then exit.
     #[arg(long)]
@@ -100,6 +104,7 @@ impl Cli {
             hashlists_path: self.hashlists_path.clone(),
             preprocessors_path: self.preprocessors_path.clone(),
             zaps_path: self.zaps_path.clone(),
+            cache_path: self.cache_path.clone(),
             hashcat_path: self.hashcat_path.clone(),
         }
     }

@@ -74,6 +74,7 @@ mod tests {
             paths,
             progress_mode: progress::ProgressMode::Absolute,
             auto_pipe: None,
+            cache_dir: None,
         };
 
         (dir, cracker)

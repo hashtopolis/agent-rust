@@ -3,15 +3,13 @@
 //! Before 7.1.2-546, `PROGRESS` includes skipped candidates. From that build
 //! onward it is relative to the chunk's start. `CURKU` remains absolute.
 
-use std::path::Path;
-use std::process::Output;
-
-use tokio::process::Command;
-
-use crate::cracker::CrackerError;
 use crate::model::Chunk;
 
 use super::status::HashcatStatus;
+use super::version::HashcatVersion;
+
+/// The first build whose `PROGRESS` is relative to the chunk's start.
+const RELATIVE_PROGRESS_SINCE: HashcatVersion = HashcatVersion::new(7, 1, 2, 546);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProgressMode {
@@ -20,70 +18,12 @@ pub(super) enum ProgressMode {
 }
 
 impl ProgressMode {
-    /// Read the binary's version to select its progress convention.
-    pub(super) async fn detect(binary: &Path) -> Result<Self, CrackerError> {
-        let cwd = binary.parent().unwrap_or(Path::new("."));
-
-        // A one-line probe needs neither a process group nor the spawn log of
-        // `process::run_capture`, so it bypasses the shared helper.
-        let Output {
-            stdout,
-            stderr,
-            status,
-        } = Command::new(binary)
-            .arg("--version")
-            .current_dir(cwd)
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|error| CrackerError::Process(error.to_string()))?;
-
-        if !status.success() {
-            return Err(CrackerError::Process(format!(
-                "hashcat --version failed ({}): {}",
-                status,
-                String::from_utf8_lossy(&stderr).trim()
-            )));
-        }
-
-        let stdout = String::from_utf8_lossy(&stdout);
-        let version = stdout.trim();
-
-        let mode = ProgressMode::from_version(version).ok_or_else(|| {
-            CrackerError::Other(format!(
-                "hashcat --version returned an invalid version: {version:?}"
-            ))
-        })?;
-
-        tracing::debug!(version, ?mode, "hashcat progress convention");
-
-        Ok(mode)
-    }
-
-    /// Accept release and git-describe versions, e.g. `v7.1.2-546-gc885beef`.
-    fn from_version(version: &str) -> Option<Self> {
-        let version = version.trim().trim_start_matches('v');
-
-        let (major, minor, patch, revision) = {
-            let mut fields = version.split(['.', '-']);
-
-            let major = fields.next()?.parse::<u64>().ok()?;
-            let minor = fields.next()?.parse::<u64>().ok()?;
-            let patch = fields.next()?.parse::<u64>().ok()?;
-            let revision = fields
-                .next()
-                .map(str::parse::<u64>)
-                .transpose()
-                .ok()?
-                .unwrap_or(0);
-
-            (major, minor, patch, revision)
-        };
-
-        if (major, minor, patch, revision) >= (7, 1, 2, 546) {
-            Some(Self::Relative)
+    /// Select the progress convention of a hashcat version.
+    pub(super) fn for_version(version: HashcatVersion) -> Self {
+        if version >= RELATIVE_PROGRESS_SINCE {
+            Self::Relative
         } else {
-            Some(Self::Absolute)
+            Self::Absolute
         }
     }
 
@@ -168,6 +108,10 @@ mod tests {
         ))
     }
 
+    fn mode(version: &str) -> ProgressMode {
+        ProgressMode::for_version(HashcatVersion::parse(version).unwrap())
+    }
+
     #[test]
     fn version_cutoff_includes_git_build_number() {
         for version in [
@@ -176,11 +120,7 @@ mod tests {
             "v7.1.2",
             "v7.1.2-545-gc885beef",
         ] {
-            assert_eq!(
-                ProgressMode::from_version(version),
-                Some(ProgressMode::Absolute),
-                "{version}"
-            );
+            assert_eq!(mode(version), ProgressMode::Absolute, "{version}");
         }
 
         for version in [
@@ -190,76 +130,13 @@ mod tests {
             "v7.2.0",
             "v8.0.0",
         ] {
-            assert_eq!(
-                ProgressMode::from_version(version),
-                Some(ProgressMode::Relative),
-                "{version}"
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    fn fake_hashcat(dir: &Path, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = dir.join("hashcat");
-        std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        path
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn detect_reads_the_version_from_the_binary() {
-        let tmp = tempfile::TempDir::new().unwrap();
-
-        let path = fake_hashcat(tmp.path(), "#!/bin/sh\necho 'v7.1.2-546-gc885beef'\n");
-        let mode = ProgressMode::detect(&path).await.unwrap();
-
-        assert_eq!(mode, ProgressMode::Relative);
-
-        let path = fake_hashcat(tmp.path(), "#!/bin/sh\necho 'v6.2.6'\n");
-        let mode = ProgressMode::detect(&path).await.unwrap();
-
-        assert_eq!(mode, ProgressMode::Absolute);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn detect_rejects_a_failing_or_unparsable_binary() {
-        let tmp = tempfile::TempDir::new().unwrap();
-
-        let path = fake_hashcat(tmp.path(), "#!/bin/sh\necho 'broken' >&2\nexit 1\n");
-        let error = ProgressMode::detect(&path).await.unwrap_err();
-
-        assert!(
-            matches!(&error, CrackerError::Process(message) if message.contains("broken")),
-            "{error:?}"
-        );
-
-        let path = fake_hashcat(tmp.path(), "#!/bin/sh\necho 'hashcat'\n");
-        let error = ProgressMode::detect(&path).await.unwrap_err();
-
-        assert!(matches!(error, CrackerError::Other(_)), "{error:?}");
-
-        let error = ProgressMode::detect(&tmp.path().join("missing"))
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, CrackerError::Process(_)), "{error:?}");
-    }
-
-    #[test]
-    fn invalid_versions_are_rejected() {
-        for version in ["", "hashcat", "v7.1", "v7.x.2", "v7.1.2-invalid"] {
-            assert_eq!(ProgressMode::from_version(version), None, "{version}");
+            assert_eq!(mode(version), ProgressMode::Relative, "{version}");
         }
     }
 
     #[test]
     fn relative_progress_is_correct_even_for_a_late_first_status() {
-        let mode = ProgressMode::from_version("v7.1.2-546-gc885beef").unwrap();
+        let mode = mode("v7.1.2-546-gc885beef");
 
         assert_eq!(
             mode.basis_points(&status(54000, TOTAL), &chunk(9000), false),
@@ -273,7 +150,7 @@ mod tests {
 
     #[test]
     fn older_versions_subtract_the_chunk_start() {
-        let mode = ProgressMode::from_version("v7.1.2").unwrap();
+        let mode = mode("v7.1.2");
 
         assert_eq!(
             mode.basis_points(&status(180000, 240000), &chunk(9000), false),

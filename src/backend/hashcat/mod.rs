@@ -1,6 +1,7 @@
 mod argv;
 mod auto_pipe;
 mod benchmark;
+mod cache;
 mod chunk;
 mod healthcheck;
 mod keyspace;
@@ -8,6 +9,7 @@ mod paths;
 mod producer;
 mod progress;
 pub mod status;
+mod version;
 
 use std::path::PathBuf;
 
@@ -29,6 +31,9 @@ pub struct HashcatCracker {
     paths: Paths,
     progress_mode: progress::ProgressMode,
     auto_pipe: Option<AutoPipePolicy>,
+    /// The configured `paths.cache`, absolute, kept only when this binary knows
+    /// `--cache-path`.
+    cache_dir: Option<PathBuf>,
 }
 
 impl HashcatCracker {
@@ -39,7 +44,11 @@ impl HashcatCracker {
         paths: Paths,
         auto_pipe: Option<AutoPipePolicy>,
     ) -> Result<Self, CrackerError> {
-        let progress_mode = progress::ProgressMode::detect(&binary_path).await?;
+        let version = version::HashcatVersion::probe(&binary_path).await?;
+        let progress_mode = progress::ProgressMode::for_version(version);
+        tracing::debug!(?progress_mode, "hashcat progress convention");
+
+        let cache_dir = cache::supported_cache_dir(paths.cache.as_deref(), version);
 
         Ok(Self {
             cracker_id,
@@ -47,6 +56,7 @@ impl HashcatCracker {
             paths,
             progress_mode,
             auto_pipe,
+            cache_dir,
         })
     }
 }
@@ -198,6 +208,7 @@ mod tests {
             paths: Paths::default(),
             progress_mode: ProgressMode::Absolute,
             auto_pipe: None,
+            cache_dir: None,
         }
     }
 
