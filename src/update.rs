@@ -7,7 +7,7 @@
 //! each entry's `triples`.
 //!
 //! [`apply`] installs but does not restart: the caller first winds the process
-//! down (ending tasks), then calls [`PendingRestart::restart`].
+//! down (ending tasks, flushing the log), then calls [`PendingRestart::restart`].
 //! A staged binary must pass a version probe before installation. Replacement or
 //! restart failures restore the previous executable; rollback failures are reported
 //! separately. Crashes after a successful restart require external supervision.

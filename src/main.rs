@@ -22,12 +22,40 @@ fn main() -> ExitCode {
         (false, true) => Verbosity::Debug,
         (false, false) => Verbosity::Normal,
     };
-    htp_agent::log::init(verbosity);
 
-    match run(&cli) {
+    // The log file is configured in the config file, so logging starts after
+    // loading it. If that fails, a log file given on the command line still
+    // records why.
+    let config = Config::load(&cli.config, &cli.state, cli.overrides());
+
+    let log_file = match &config {
+        Ok(config) => config.settings().log.clone(),
+        Err(_) => cli.log_file_from_flags(),
+    };
+
+    let log = match htp_agent::log::init(verbosity, log_file.as_ref()) {
+        Ok(log) => log,
+        Err(error) => {
+            tracing::error!("agent exited: {error}");
+
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let config = match config {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!("agent exited: {error}");
+
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match run(&cli, config) {
         Ok(Exit::Shutdown) => ExitCode::SUCCESS,
         Ok(Exit::Restart(update)) => {
             tracing::info!("restarting into the installed update");
+            log.flush();
 
             match update.restart() {
                 Ok(()) => ExitCode::SUCCESS,
@@ -50,9 +78,7 @@ fn main() -> ExitCode {
 /// returns, which ends every task (and the crackers they started), so a restart
 /// begins from a settled process.
 #[tokio::main]
-async fn run(cli: &Cli) -> Result<Exit<PendingRestart>> {
-    let config = Config::load(&cli.config, &cli.state, cli.overrides())?;
-
+async fn run(cli: &Cli, config: Config) -> Result<Exit<PendingRestart>> {
     let url = config.require_url()?;
     let http = HttpSettings::from_server(&config.settings().server)?;
 
