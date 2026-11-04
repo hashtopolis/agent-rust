@@ -124,6 +124,11 @@ pub struct Paths {
     pub hashlists: PathBuf,
     pub preprocessors: PathBuf,
     pub zaps: PathBuf,
+    /// Where hashcat keeps its wordlist seek databases and compiled kernels
+    /// (`--cache-path`). Unset, hashcat uses its own location in the cracker
+    /// directory. May be shared between agents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<PathBuf>,
 }
 
 impl Default for Paths {
@@ -134,6 +139,7 @@ impl Default for Paths {
             hashlists: PathBuf::from("hashlists"),
             preprocessors: PathBuf::from("preprocessors"),
             zaps: PathBuf::from("zaps"),
+            cache: None,
         }
     }
 }
@@ -225,6 +231,7 @@ pub struct Overrides {
     pub hashlists_path: Option<PathBuf>,
     pub preprocessors_path: Option<PathBuf>,
     pub zaps_path: Option<PathBuf>,
+    pub cache_path: Option<PathBuf>,
     pub hashcat_path: Option<PathBuf>,
 }
 
@@ -282,6 +289,10 @@ impl Overrides {
             if let Some(path) = override_value {
                 *target = path;
             }
+        }
+
+        if self.cache_path.is_some() {
+            settings.paths.cache = self.cache_path;
         }
     }
 }
@@ -511,6 +522,7 @@ mod tests {
             },
             paths: Paths {
                 files: PathBuf::from("/data/files"),
+                cache: Some(PathBuf::from("/mnt/hccache")),
                 ..Paths::default()
             },
             behavior: Behavior {
@@ -576,6 +588,7 @@ mod tests {
                 url: Some("https://from-cli.example/api/server.php".to_string()),
                 cpu_only: true,
                 files_path: Some(PathBuf::from("/scratch/files")),
+                cache_path: Some(PathBuf::from("/scratch/cache")),
                 ..Overrides::default()
             })
             .unwrap();
@@ -588,6 +601,10 @@ mod tests {
         assert_eq!(
             config.settings().paths.files,
             PathBuf::from("/scratch/files")
+        );
+        assert_eq!(
+            config.settings().paths.cache,
+            Some(PathBuf::from("/scratch/cache"))
         );
     }
 

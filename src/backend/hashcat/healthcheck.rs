@@ -37,6 +37,7 @@ pub(super) async fn run(
         .arg("--potfile-disable")
         .arg("--session=health")
         .args(cracker.resolve_attack(attack, hashlist_alias, Some(&hashlist)))
+        .args(cracker.cache_arg())
         .arg("-o")
         .arg(argv::path_arg(&outfile))
         .build();

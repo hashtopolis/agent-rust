@@ -799,6 +799,7 @@ mod tests {
             hashlists: root.join("hashlists"),
             preprocessors: root.join("preprocessors"),
             zaps: root.join("zaps"),
+            cache: None,
         }
     }
 

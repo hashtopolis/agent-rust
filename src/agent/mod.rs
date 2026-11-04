@@ -146,6 +146,21 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             })?;
         }
 
+        // hashcat aborts when handed a cache directory that does not exist, so
+        // create it here. Unlike the others it may be a read-only or currently
+        // unmounted share, which must not stop the agent: each hashcat run checks
+        // again and leaves the option off while it is missing. If it points at a
+        // mountpoint that is down, this creates an empty local directory there.
+        if let Some(cache) = &paths.cache {
+            if let Err(error) = std::fs::create_dir_all(cache) {
+                tracing::warn!(
+                    cache_path = %cache.display(),
+                    %error,
+                    "could not create cache directory"
+                );
+            }
+        }
+
         Ok(())
     }
 }

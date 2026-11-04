@@ -10,7 +10,7 @@ use super::{ChunkSource, HashcatCracker, HashcatInvocation, OUTFILE_FORMAT, Prod
 impl HashcatCracker {
     /// The flag block shared by every hashcat consumer, whatever feeds it:
     /// machine-readable status, quiet, the outfile and zap wiring, and the tab
-    /// separator. Skip/limit, the removal or brain flags, the hashlist, and the
+    /// separator, plus the cache directory. Skip/limit, the removal or brain flags, the hashlist, and the
     /// candidate source are layered on per [`ChunkSource`] by
     /// [`Self::build_invocation`].
     fn consumer_base_args(&self, task: &TaskAssignment, outfile: &Path, zaps_dir: &Path) -> Args {
@@ -28,6 +28,7 @@ impl HashcatCracker {
             .arg(format!("--outfile-format={OUTFILE_FORMAT}"))
             .arg("-p")
             .arg("\t")
+            .args(self.cache_arg())
     }
 
     /// Disable the potfile, strip cracked hashes from the list, and re-check on
@@ -152,6 +153,9 @@ impl HashcatCracker {
             .arg("-l")
             .arg(chunk.length.to_string())
             .args(self.resolve_attack(&task.attack_command, &task.hashlist_alias, None))
+            // The producer is the half that reads the wordlist, so it is the one
+            // whose seek database matters.
+            .args(self.cache_arg())
             .build();
 
         ProducerStage {
@@ -207,6 +211,7 @@ mod tests {
     use crate::config::Paths;
     use crate::model::{BenchmarkType, Chunk, ResolvedPreprocessor, TaskAssignment};
 
+    use super::super::argv::path_arg;
     use super::super::{ChunkSource, HashcatCracker};
 
     fn cracker() -> HashcatCracker {
@@ -225,6 +230,7 @@ mod tests {
             paths,
             progress_mode: super::super::progress::ProgressMode::Absolute,
             auto_pipe: None,
+            cache_dir: None,
         }
     }
 
@@ -404,5 +410,45 @@ mod tests {
         // Removal flags are fixed for a piped consumer.
         assert!(invocation.args.iter().any(|arg| arg == "--remove"));
         assert!(invocation.args.iter().any(|arg| arg == "--potfile-disable"));
+    }
+
+    #[test]
+    fn a_cache_dir_reaches_every_hashcat_but_not_a_preprocessor() {
+        let cache = tempfile::tempdir().unwrap();
+        let flag = format!("--cache-path={}", path_arg(cache.path()));
+
+        let mut cracker = cracker();
+        cracker.cache_dir = Some(cache.path().to_path_buf());
+
+        let direct = cracker
+            .build_invocation(&task(), &CHUNK, ChunkSource::Direct)
+            .unwrap();
+        assert!(direct.args.contains(&flag), "{:?}", direct.args);
+
+        // Both halves of a self-pipe are hashcat.
+        let self_pipe = cracker
+            .build_invocation(&task(), &CHUNK, ChunkSource::SelfPipe)
+            .unwrap();
+        assert!(self_pipe.args.contains(&flag), "{:?}", self_pipe.args);
+        let producer = self_pipe.producer.unwrap();
+        assert!(producer.args.contains(&flag), "{:?}", producer.args);
+
+        let pp = preprocessor(None, None);
+        let piped = cracker
+            .build_invocation(&task(), &CHUNK, ChunkSource::Preprocessor(&pp))
+            .unwrap();
+        assert!(piped.args.contains(&flag), "{:?}", piped.args);
+        assert!(!piped.producer.unwrap().args.contains(&flag));
+
+        // A cache directory that went away leaves the option off.
+        drop(cache);
+        let gone = cracker
+            .build_invocation(&task(), &CHUNK, ChunkSource::Direct)
+            .unwrap();
+        assert!(
+            !gone.args.iter().any(|arg| arg.starts_with("--cache-path")),
+            "{:?}",
+            gone.args
+        );
     }
 }

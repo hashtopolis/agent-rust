@@ -34,6 +34,7 @@ async fn measure_hashcat(
         .arg("--keyspace")
         .arg("--quiet")
         .args(cracker.resolve_attack(&task.attack_command, &task.hashlist_alias, None))
+        .args(cracker.cache_arg())
         .args(argv::split_parameters(&task.cmd_parameters))
         .arg_if(task.brain.is_some(), "-S")
         .build();
