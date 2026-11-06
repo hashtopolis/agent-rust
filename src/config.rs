@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 pub const DEFAULT_SETTINGS_FILE: &str = "config.json";
 pub const DEFAULT_STATE_FILE: &str = "state.json";
+pub const SCHEDULE_FILE: &str = "schedule.json";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -608,6 +609,10 @@ impl Config {
         &self.state_path
     }
 
+    pub fn schedule_file_path(&self) -> PathBuf {
+        self.settings_path.with_file_name(SCHEDULE_FILE)
+    }
+
     pub fn token(&self) -> Option<&str> {
         self.state.token.as_deref()
     }
@@ -1011,6 +1016,30 @@ mod tests {
                 "{old_key}: expected a JSON error, got {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_active_hours_file_sits_next_to_the_config_file() {
+        let load = |settings: &str| {
+            Config::load(
+                settings,
+                "/nonexistent/htp/state.json",
+                Overrides::default(),
+            )
+            .unwrap()
+        };
+
+        let absolute = load("/nonexistent/htp/config.json");
+        let relative = load("nonexistent-htp/config.json");
+
+        assert_eq!(
+            absolute.schedule_file_path(),
+            Path::new("/nonexistent/htp/schedule.json")
+        );
+        assert_eq!(
+            relative.schedule_file_path(),
+            Path::new("nonexistent-htp/schedule.json")
+        );
     }
 
     #[test]
