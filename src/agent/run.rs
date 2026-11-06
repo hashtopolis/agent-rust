@@ -13,6 +13,7 @@ use crate::cracker::Cracker;
 use crate::log;
 use crate::model::{GetChunkResponse, GetTaskResponse, ResolvedPreprocessor, TaskAssignment};
 use crate::provisioner::Provisioner;
+use crate::schedule::Activity;
 use crate::transport::Transport;
 
 use super::progress::ClientSink;
@@ -21,11 +22,15 @@ use super::{Agent, AgentError};
 pub(super) const RETRY_DELAY: Duration = Duration::from_secs(5);
 const IDLE_DELAY: Duration = Duration::from_secs(5);
 const BENCH_FAIL_DELAY: Duration = Duration::from_secs(10);
+const PAUSE_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     Continue,
     Sleep(Duration),
+    /// Outside active hours: wait at most this long, waking early when the
+    /// schedule file is edited.
+    Pause(Duration),
     Shutdown,
     /// An update is installed; the agent should stop and restart into it.
     Restart,
@@ -94,6 +99,19 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                         _ = sleep(delay) => {}
                     }
                 }
+                Step::Pause(max) => {
+                    let wait = async {
+                        match &self.active_hours {
+                            Some(active_hours) => active_hours.wait(max).await,
+                            None => sleep(max).await,
+                        }
+                    };
+
+                    tokio::select! {
+                        _ = &mut shutdown => return Ok(Exit::Shutdown),
+                        _ = wait => {}
+                    }
+                }
                 Step::Shutdown => return Ok(Exit::Shutdown),
                 Step::Restart => {
                     let restart = self
@@ -109,6 +127,10 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
 
     pub async fn tick(&mut self, state: &mut LoopState) -> Result<Step, AgentError> {
         self.maybe_deletion_check(state).await;
+
+        if let Some(step) = self.pause_if_inactive(state) {
+            return Ok(step);
+        }
 
         if state.current_task.is_none() {
             match self.client.get_task().await {
@@ -226,6 +248,11 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             state.prepared_task_id = Some(task.task_id);
         }
 
+        // Setup can take long enough for the window to close in between.
+        if let Some(step) = self.pause_if_inactive(state) {
+            return Ok(step);
+        }
+
         let chunk = match self.client.get_chunk(task.task_id).await {
             Ok(chunk) => chunk,
             Err(error) => {
@@ -332,6 +359,24 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
         }
     }
 
+    /// Outside active hours, drop the current task so the agent re-syncs
+    /// through getTask on resume, and pause until the schedule allows work
+    /// again (re-checking at least every `PAUSE_DELAY`). The deletion check
+    /// keeps running while paused, so the task's files are ensured again on
+    /// resume.
+    fn pause_if_inactive(&mut self, state: &mut LoopState) -> Option<Step> {
+        let Activity::Inactive { resumes_in } = self.active_hours.as_mut()?.check() else {
+            return None;
+        };
+
+        state.reset_task();
+        state.invalidate_setup();
+
+        Some(Step::Pause(
+            resumes_in.map_or(PAUSE_DELAY, |delay| delay.min(PAUSE_DELAY)),
+        ))
+    }
+
     async fn maybe_deletion_check(&self, state: &mut LoopState) {
         let behavior = &self.config.settings().behavior;
 
@@ -355,6 +400,15 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
     /// True once an update is installed and the agent should restart into it.
     async fn maybe_check_version(&mut self) -> bool {
         if self.config.settings().behavior.disable_update {
+            return false;
+        }
+
+        // A chunk or setup that ran past the end of the window must not update
+        // and restart in blocked hours; setup runs again on resume, and checks
+        // then.
+        if let Some(Activity::Inactive { .. }) =
+            self.active_hours.as_mut().map(|hours| hours.check())
+        {
             return false;
         }
 

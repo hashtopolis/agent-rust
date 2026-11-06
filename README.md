@@ -220,6 +220,58 @@ anything else is a `RUST_LOG`-style filter, such as
 output includes full request and response bodies with the agent token, so the
 agent warns at startup when the file records it.
 
+### Active hours
+
+On machines that are used for other work during the day, such as office
+workstations, a `schedule.json` next to the config file says when the
+agent may ask the server for work. Without that file, the agent works at any
+time.
+
+The file names either the hours the agent may work (`active`) or the hours it
+must leave the machine alone (`inactive`), never both. Office hours are a
+single line:
+
+```json
+{ "inactive": ["Mon-Fri 07:00-18:00"] }
+```
+
+Nights only, every day:
+
+```json
+{ "active": ["22:00-06:00"] }
+```
+
+Each entry is `[DAYS ]FROM-TO`:
+
+- `DAYS` is a comma-separated list of days or day ranges, such as `Mon`,
+  `Mon-Fri`, `Mon,Wed,Fri` or `Fri-Mon` (a range may wrap past Sunday). Days
+  are the three-letter English abbreviations `Mon` to `Sun`. Without days, the
+  entry applies to every day.
+- `FROM` and `TO` are 24-hour times (`7:00` or `07:00`). `TO` may be `24:00`.
+  A window that ends before it starts runs past midnight and belongs to the day
+  it starts on: `Fri 18:00-07:00` runs from Friday evening to Saturday morning,
+  and `18:00-00:00` means until midnight. `FROM` and `TO` must differ.
+- A window starts at `FROM` and is over at `TO`. Windows may overlap.
+- Times are the machine's local time. Case and spaces don't matter.
+- Any key other than `active` or `inactive` is an error.
+
+`{"active": []}` never works and `{"inactive": []}` always does.
+
+The schedule only stops the agent from asking for new work: a chunk that is
+running when the window closes finishes normally. While paused, the agent also
+skips update checks, so it never updates or restarts during blocked hours, but
+it still deletes files the server no longer needs. It makes no other calls, so
+the server shows it as offline. Paused agents keep their task assignment, so
+they still hold small tasks and count towards a task's maximum number of
+agents.
+
+The file can be created, edited or deleted while the agent runs. A paused agent
+notices a change within a second and resumes as soon as the new schedule
+allows; a working agent picks it up before it next asks for work, so a running
+chunk still finishes first. Deleting the file lifts the schedule. An edit that
+can't be read or parsed keeps the previous schedule and logs a warning. An
+invalid file at startup stops the agent with an error.
+
 ### Server connection
 
 - **Server certificates** are checked against the operating system's trust

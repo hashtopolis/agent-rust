@@ -11,8 +11,11 @@ use htp_agent::download::HttpDownloader;
 use htp_agent::http::HttpSettings;
 use htp_agent::log::Verbosity;
 use htp_agent::provisioner::DiskProvisioner;
+use htp_agent::schedule::{ActiveHours, ScheduleFile};
 use htp_agent::transport::HttpTransport;
 use htp_agent::update::PendingRestart;
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -99,6 +102,33 @@ async fn run(cli: &Cli, config: Config) -> Result<Exit<PendingRestart>> {
         return Ok(Exit::Shutdown);
     }
 
+    let active_hours = {
+        let file = ScheduleFile::load(config.schedule_file_path())?;
+
+        // Without a system time zone, jiff falls back to one that behaves like
+        // UTC, and only says so through the `log` crate, which goes nowhere.
+        let system_zone = TimeZone::try_system();
+        let time_zone = match &system_zone {
+            Ok(zone) => zone.iana_name().map_or_else(
+                || format!("UTC{}", zone.to_offset(Timestamp::now())),
+                str::to_string,
+            ),
+            Err(_) => "UTC".to_string(),
+        };
+
+        if file.schedule().is_some() {
+            tracing::info!(path = %file.path().display(), time_zone, "active hours loaded");
+
+            if let Err(error) = &system_zone {
+                tracing::warn!(%error, "system time zone unknown, active hours run on UTC");
+            }
+        } else {
+            tracing::debug!(path = %file.path().display(), time_zone, "no active hours file");
+        }
+
+        ActiveHours::new(file)
+    };
+
     // No timeout here: downloads may stream for many minutes.
     let downloader = {
         let client = http
@@ -125,7 +155,9 @@ async fn run(cli: &Cli, config: Config) -> Result<Exit<PendingRestart>> {
             .build()
     };
 
-    let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
+    let mut agent = Agent::bootstrap(transport, config, provisioner)
+        .await?
+        .with_active_hours(active_hours);
 
     Ok(agent.run().await?)
 }

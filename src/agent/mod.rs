@@ -12,6 +12,7 @@ use crate::client::{Client, ClientError};
 use crate::config::{Config, ConfigError, Paths};
 use crate::identity::client_signature;
 use crate::provisioner::Provisioner;
+use crate::schedule::ActiveHours;
 use crate::sysinfo;
 use crate::transport::Transport;
 
@@ -77,8 +78,8 @@ pub struct Agent<T: Transport, P: Provisioner<T>> {
     provisioner: P,
     #[allow(dead_code)]
     session: Session,
-    /// Set by a version check that installed an update; handed back by `run`.
     pending_restart: Option<P::Restart>,
+    active_hours: Option<ActiveHours>,
 }
 
 impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
@@ -89,7 +90,14 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             provisioner,
             session,
             pending_restart: None,
+            active_hours: None,
         }
+    }
+
+    pub fn with_active_hours(mut self, active_hours: ActiveHours) -> Self {
+        self.active_hours = Some(active_hours);
+
+        self
     }
 
     pub async fn bootstrap(

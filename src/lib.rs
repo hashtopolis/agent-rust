@@ -15,6 +15,7 @@ pub mod log;
 pub mod model;
 pub mod process;
 pub mod provisioner;
+pub mod schedule;
 pub mod sysinfo;
 pub mod transport;
 pub mod update;
