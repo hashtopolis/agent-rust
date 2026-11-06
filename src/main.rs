@@ -11,8 +11,10 @@ use htp_agent::download::HttpDownloader;
 use htp_agent::http::HttpSettings;
 use htp_agent::log::Verbosity;
 use htp_agent::provisioner::DiskProvisioner;
+use htp_agent::schedule::{ActiveHours, ScheduleFile};
 use htp_agent::transport::HttpTransport;
 use htp_agent::update::PendingRestart;
+use jiff::tz::TimeZone;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -99,6 +101,21 @@ async fn run(cli: &Cli, config: Config) -> Result<Exit<PendingRestart>> {
         return Ok(Exit::Shutdown);
     }
 
+    let active_hours = {
+        let file = ScheduleFile::load(config.schedule_file_path())?;
+
+        let time_zone = TimeZone::system();
+        let time_zone = time_zone.iana_name().unwrap_or("unknown");
+
+        if file.schedule().is_some() {
+            tracing::info!(path = %file.path().display(), time_zone, "active hours loaded");
+        } else {
+            tracing::debug!(path = %file.path().display(), time_zone, "no active hours file");
+        }
+
+        ActiveHours::new(file)
+    };
+
     // No timeout here: downloads may stream for many minutes.
     let downloader = {
         let client = http
@@ -125,7 +142,9 @@ async fn run(cli: &Cli, config: Config) -> Result<Exit<PendingRestart>> {
             .build()
     };
 
-    let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
+    let mut agent = Agent::bootstrap(transport, config, provisioner)
+        .await?
+        .with_active_hours(active_hours);
 
     Ok(agent.run().await?)
 }

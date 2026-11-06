@@ -45,8 +45,11 @@ self-replace = "1"
 tempfile = "3.27.0"
 # Already in the tree through zip; compresses rotated log files.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+jiff = "0.2.39"
 
 [dev-dependencies]
+# The paused test clock for the active hours wait.
+tokio = { version = "1", features = ["full", "test-util"] }
 # Server side of the TLS tests; already in the tree through reqwest.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 

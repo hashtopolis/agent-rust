@@ -1,7 +1,11 @@
+use std::collections::VecDeque;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use htp_agent::agent::{Agent, AgentError, Exit, LoopState, Step};
 use htp_agent::client::Client;
+use htp_agent::schedule::{ActiveHours, ScheduleFile, WeekSecond};
+use jiff::civil::{self, Weekday};
 use serde_json::{Value, json};
 
 use crate::support::env::{Env, test_session};
@@ -18,7 +22,7 @@ struct AgentRig {
     transport: ScriptedTransport,
     provisioner: FakeProvisioner,
     state: LoopState,
-    _env: Env,
+    env: Env,
 }
 
 impl AgentRig {
@@ -41,8 +45,38 @@ impl AgentRig {
             transport,
             provisioner,
             state: LoopState::new(),
-            _env: env,
+            env,
         }
+    }
+
+    fn with_active_hours(
+        replies: impl IntoIterator<Item = Value>,
+        schedule: &str,
+        clock: impl IntoIterator<Item = WeekSecond>,
+    ) -> Self {
+        Self::rig(replies).active_hours(schedule, clock)
+    }
+
+    /// Active hours from `schedule`, read against a clock that hands out
+    /// `clock` in order and then keeps repeating the last one.
+    fn active_hours(mut self, schedule: &str, clock: impl IntoIterator<Item = WeekSecond>) -> Self {
+        let path = self.env.write_file("schedule.json", schedule);
+        let file = ScheduleFile::load(path).unwrap();
+        let times = Mutex::new(clock.into_iter().collect::<VecDeque<_>>());
+
+        let hours = ActiveHours::with_clock(file, move || {
+            let mut times = times.lock().unwrap();
+
+            if times.len() > 1 {
+                times.pop_front().unwrap()
+            } else {
+                times[0]
+            }
+        });
+
+        self.agent = self.agent.with_active_hours(hours);
+
+        self
     }
 
     async fn tick(&mut self) -> Result<Step, AgentError> {
@@ -474,4 +508,159 @@ async fn a_get_chunk_health_check_runs_and_resets_the_task() {
             .actions()
             .contains(&"sendHealthCheck".to_string())
     );
+}
+
+fn monday(hh: i8, mm: i8, ss: i8) -> WeekSecond {
+    WeekSecond::from_civil(Weekday::Monday, civil::time(hh, mm, ss, 0))
+}
+
+#[tokio::test]
+async fn a_paused_tick_asks_for_no_work() {
+    let mut rig = AgentRig::with_active_hours([], r#"{"active": []}"#, [monday(0, 0, 0)]);
+
+    let step = rig.tick().await.unwrap();
+
+    assert_eq!(step, Step::Pause(Duration::from_secs(60)));
+    assert!(rig.transport.actions().is_empty());
+    assert_eq!(rig.provisioner.calls(), [Stage::DeletionCheck]);
+}
+
+#[tokio::test]
+async fn a_pause_ends_when_the_window_opens() {
+    let mut rig = AgentRig::with_active_hours(
+        [],
+        r#"{"active": ["Mon 18:00-20:00"]}"#,
+        [monday(17, 59, 30)],
+    );
+
+    let step = rig.tick().await.unwrap();
+
+    assert_eq!(step, Step::Pause(Duration::from_secs(30)));
+}
+
+#[tokio::test]
+async fn an_open_window_works_as_usual() {
+    let mut rig = AgentRig::with_active_hours(
+        [json!({"action": "getTask", "response": "SUCCESS", "taskId": null})],
+        r#"{"active": ["Mon 18:00-20:00"]}"#,
+        [monday(19, 0, 0)],
+    );
+
+    let step = rig.tick().await.unwrap();
+
+    assert_eq!(step, Step::Sleep(Duration::from_secs(5)));
+    assert_eq!(rig.transport.actions(), ["getTask"]);
+}
+
+#[tokio::test]
+async fn a_window_closing_during_setup_stops_before_get_chunk() {
+    let mut rig = AgentRig::with_active_hours(
+        [task_reply(25, 45, 13)],
+        r#"{"active": ["Mon 18:00-20:00"]}"#,
+        [monday(19, 0, 0), monday(21, 0, 0)],
+    );
+
+    let step = rig.tick().await.unwrap();
+
+    assert!(matches!(step, Step::Pause(_)));
+    assert_eq!(rig.transport.actions(), ["getTask"]);
+    assert!(rig.state.current_task().is_none());
+}
+
+#[tokio::test]
+async fn a_pause_makes_the_resumed_task_check_its_files_again() {
+    let mut rig = AgentRig::with_active_hours(
+        [
+            task_reply(25, 45, 13),
+            chunk_reply(0),
+            task_reply(25, 45, 13),
+            chunk_reply(0),
+        ],
+        r#"{"active": ["Mon 18:00-20:00"]}"#,
+        [
+            monday(19, 0, 0),
+            monday(19, 0, 0),
+            monday(21, 0, 0),
+            monday(19, 0, 0),
+        ],
+    );
+
+    rig.tick().await.unwrap();
+    rig.tick().await.unwrap();
+    rig.tick().await.unwrap();
+
+    // The deletion check keeps running while paused, so the files are looked
+    // at again on resume.
+    let file_checks = rig
+        .provisioner
+        .calls()
+        .iter()
+        .filter(|stage| **stage == Stage::Files)
+        .count();
+    assert_eq!(file_checks, 2);
+}
+
+#[tokio::test]
+async fn a_chunk_ending_after_the_window_does_not_check_for_updates() {
+    let mut rig = AgentRig::with_active_hours(
+        [
+            task_reply(25, 45, 13),
+            chunk_reply(10_000),
+            progress_continue(),
+        ],
+        r#"{"active": ["Mon 18:00-20:00"]}"#,
+        [
+            monday(19, 0, 0),
+            monday(19, 0, 0),
+            monday(19, 0, 0),
+            monday(21, 0, 0),
+        ],
+    );
+
+    rig.tick().await.unwrap();
+
+    // Only the check during setup, while the window was still open.
+    assert_eq!(
+        rig.provisioner.calls(),
+        [
+            Stage::DeletionCheck,
+            Stage::Cracker,
+            Stage::Files,
+            Stage::Hashlist,
+            Stage::CheckVersion,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn setup_running_past_the_window_does_not_check_for_updates() {
+    let mut rig = AgentRig::with_active_hours(
+        [task_reply(25, 45, 13)],
+        r#"{"active": ["Mon 18:00-20:00"]}"#,
+        [monday(19, 0, 0), monday(21, 0, 0)],
+    );
+
+    rig.tick().await.unwrap();
+
+    assert!(!rig.provisioner.calls().contains(&Stage::CheckVersion));
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_waits_out_a_pause_before_working_again() {
+    // Paused 30 seconds before the window opens; the update installed on the
+    // first version check after resuming ends the run.
+    let mut rig = AgentRig::with_provisioner(
+        [task_reply(25, 45, 13)],
+        FakeProvisioner::new().updating_on_check(1),
+    )
+    .active_hours(
+        r#"{"active": ["Mon 18:00-20:00"]}"#,
+        [monday(17, 59, 30), monday(19, 0, 0)],
+    );
+    let start = tokio::time::Instant::now();
+
+    let exit = rig.agent.run().await.unwrap();
+
+    assert_eq!(exit, Exit::Restart(FakeRestart));
+    assert_eq!(start.elapsed(), Duration::from_secs(30));
 }

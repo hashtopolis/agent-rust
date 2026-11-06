@@ -9,7 +9,7 @@ use tempfile::TempDir;
 /// A temporary working directory holding the two config files, so a test can
 /// build a [`Config`] and inspect what the agent wrote to `state.json`.
 pub struct Env {
-    _dir: TempDir,
+    dir: TempDir,
     pub settings_path: PathBuf,
     pub state_path: PathBuf,
 }
@@ -33,7 +33,7 @@ impl Env {
         .unwrap();
 
         Self {
-            _dir: dir,
+            dir,
             settings_path,
             state_path,
         }
@@ -43,6 +43,14 @@ impl Env {
     pub fn with_token(self, token: &str) -> Self {
         fs::write(&self.state_path, json!({ "token": token }).to_string()).unwrap();
         self
+    }
+
+    /// Write `contents` to `name` in the temporary directory.
+    pub fn write_file(&self, name: &str, contents: &str) -> PathBuf {
+        let path = self.dir.path().join(name);
+        fs::write(&path, contents).unwrap();
+
+        path
     }
 
     pub fn config(&self) -> Config {
