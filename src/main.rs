@@ -14,6 +14,7 @@ use htp_agent::provisioner::DiskProvisioner;
 use htp_agent::schedule::{ActiveHours, ScheduleFile};
 use htp_agent::transport::HttpTransport;
 use htp_agent::update::PendingRestart;
+use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 fn main() -> ExitCode {
@@ -104,11 +105,23 @@ async fn run(cli: &Cli, config: Config) -> Result<Exit<PendingRestart>> {
     let active_hours = {
         let file = ScheduleFile::load(config.schedule_file_path())?;
 
-        let time_zone = TimeZone::system();
-        let time_zone = time_zone.iana_name().unwrap_or("unknown");
+        // Without a system time zone, jiff falls back to one that behaves like
+        // UTC, and only says so through the `log` crate, which goes nowhere.
+        let system_zone = TimeZone::try_system();
+        let time_zone = match &system_zone {
+            Ok(zone) => zone.iana_name().map_or_else(
+                || format!("UTC{}", zone.to_offset(Timestamp::now())),
+                str::to_string,
+            ),
+            Err(_) => "UTC".to_string(),
+        };
 
         if file.schedule().is_some() {
             tracing::info!(path = %file.path().display(), time_zone, "active hours loaded");
+
+            if let Err(error) = &system_zone {
+                tracing::warn!(%error, "system time zone unknown, active hours run on UTC");
+            }
         } else {
             tracing::debug!(path = %file.path().display(), time_zone, "no active hours file");
         }

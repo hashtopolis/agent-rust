@@ -151,7 +151,6 @@ impl FromStr for Schedule {
                 entry: entry.clone(),
                 reason,
             })?;
-
             spans.extend(window.spans());
         }
 
@@ -267,7 +266,6 @@ fn parse_days(text: &str) -> Result<Vec<Weekday>, String> {
                 let first = parse_day(first)?;
                 let last = parse_day(last)?;
                 let length = last.since(first) as usize + 1;
-
                 days.extend(first.cycle_forward().take(length));
             }
             None => days.push(parse_day(item)?),

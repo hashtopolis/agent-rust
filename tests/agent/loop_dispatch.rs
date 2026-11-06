@@ -66,7 +66,6 @@ impl AgentRig {
 
         let hours = ActiveHours::with_clock(file, move || {
             let mut times = times.lock().unwrap();
-
             if times.len() > 1 {
                 times.pop_front().unwrap()
             } else {
@@ -569,15 +568,22 @@ async fn a_window_closing_during_setup_stops_before_get_chunk() {
 
 #[tokio::test]
 async fn a_pause_makes_the_resumed_task_check_its_files_again() {
+    // A chunk, a pause, then the same task again. A tick that works reads the
+    // clock four times: at its top, in the version check during setup, before
+    // getChunk, and in the version check after the chunk.
     let mut rig = AgentRig::with_active_hours(
         [
             task_reply(25, 45, 13),
-            chunk_reply(0),
+            chunk_reply(10_000),
+            progress_continue(),
             task_reply(25, 45, 13),
-            chunk_reply(0),
+            chunk_reply(10_000),
+            progress_continue(),
         ],
         r#"{"active": ["Mon 18:00-20:00"]}"#,
         [
+            monday(19, 0, 0),
+            monday(19, 0, 0),
             monday(19, 0, 0),
             monday(19, 0, 0),
             monday(21, 0, 0),
@@ -585,9 +591,23 @@ async fn a_pause_makes_the_resumed_task_check_its_files_again() {
         ],
     );
 
+    let worked = rig.tick().await.unwrap();
+    let paused = rig.tick().await.unwrap();
     rig.tick().await.unwrap();
-    rig.tick().await.unwrap();
-    rig.tick().await.unwrap();
+
+    assert_eq!(worked, Step::Continue);
+    assert!(matches!(paused, Step::Pause(_)));
+    assert_eq!(
+        rig.transport.actions(),
+        [
+            "getTask",
+            "getChunk",
+            "sendProgress",
+            "getTask",
+            "getChunk",
+            "sendProgress"
+        ]
+    );
 
     // The deletion check keeps running while paused, so the files are looked
     // at again on resume.

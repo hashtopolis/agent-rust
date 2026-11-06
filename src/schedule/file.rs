@@ -103,8 +103,13 @@ impl ScheduleFile {
 
                 Reload::Removed
             }
-            Err(error) => {
+            Err(error) if self.schedule.is_some() => {
                 tracing::warn!(%error, "schedule change rejected, keeping the previous schedule");
+
+                Reload::Rejected
+            }
+            Err(error) => {
+                tracing::warn!(%error, "schedule file rejected, working at any time");
 
                 Reload::Rejected
             }
@@ -268,6 +273,17 @@ mod tests {
         assert!(file.changed());
         assert_eq!(file.reload_if_changed(), Reload::Reloaded);
         assert_eq!(file.schedule(), Some(&schedule(NEVER)));
+    }
+
+    #[test]
+    fn a_file_created_invalid_leaves_no_schedule() {
+        let (_dir, path) = empty();
+        let mut file = ScheduleFile::load(&path).unwrap();
+        write(&path, INVALID);
+
+        assert_eq!(file.reload_if_changed(), Reload::Rejected);
+        assert_eq!(file.schedule(), None);
+        assert_eq!(file.reload_if_changed(), Reload::Unchanged);
     }
 
     #[test]

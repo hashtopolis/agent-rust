@@ -244,14 +244,16 @@ Nights only, every day:
 Each entry is `[DAYS ]FROM-TO`:
 
 - `DAYS` is a comma-separated list of days or day ranges, such as `Mon`,
-  `Mon-Fri`, `Mon,Wed,Fri` or `Fri-Mon` (a range may wrap past Sunday). Without
-  days, the entry applies to every day.
+  `Mon-Fri`, `Mon,Wed,Fri` or `Fri-Mon` (a range may wrap past Sunday). Days
+  are the three-letter English abbreviations `Mon` to `Sun`. Without days, the
+  entry applies to every day.
 - `FROM` and `TO` are 24-hour times (`7:00` or `07:00`). `TO` may be `24:00`.
   A window that ends before it starts runs past midnight and belongs to the day
   it starts on: `Fri 18:00-07:00` runs from Friday evening to Saturday morning,
-  and `18:00-00:00` means until midnight.
+  and `18:00-00:00` means until midnight. `FROM` and `TO` must differ.
 - A window starts at `FROM` and is over at `TO`. Windows may overlap.
 - Times are the machine's local time. Case and spaces don't matter.
+- Any key other than `active` or `inactive` is an error.
 
 `{"active": []}` never works and `{"inactive": []}` always does.
 
@@ -266,9 +268,9 @@ agents.
 The file can be created, edited or deleted while the agent runs. A paused agent
 notices a change within a second and resumes as soon as the new schedule
 allows; a working agent picks it up before it next asks for work, so a running
-chunk still finishes first. Deleting the file lifts the schedule. An edit that can't be read keeps
-the previous schedule and logs a warning. An invalid file at startup stops the
-agent with an error.
+chunk still finishes first. Deleting the file lifts the schedule. An edit that
+can't be read or parsed keeps the previous schedule and logs a warning. An
+invalid file at startup stops the agent with an error.
 
 ### Server connection
 
