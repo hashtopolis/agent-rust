@@ -290,7 +290,12 @@ impl<T: Transport, D: Downloader> Provisioner<T> for DiskProvisioner<D> {
 
         let is_hashcat = info.name.eq_ignore_ascii_case("hashcat");
 
-        let mut binary_path = cracker_dir.join(&info.binary);
+        // The server announces a base name with the OS extension appended
+        // (`hashcat.bin`). Archives which ship only the bitness-suffixed
+        // variant — the layout hashcat used up to 5.1.0, `hashcat64.bin` —
+        // resolve through the same fallback the preprocessor path uses, so a
+        // cracker configured with the plain base name still runs.
+        let mut binary_path = resolve_binary(&cracker_dir, &info.binary).await;
 
         // On macOS the archive ships no hashcat binary; fall back to a local one
         // when it is absent. The existence check still prefers an archived
@@ -500,10 +505,14 @@ async fn spawn_extract(
     Ok(())
 }
 
-/// Resolve the preprocessor executable inside its directory. The server sends a
-/// base name (e.g. `pp.bin`); when that file is absent the archive ships a
-/// bitness-suffixed variant instead (`pp64.bin`), so the agent inserts the host
-/// bitness before the extension and falls back to that.
+/// Resolve a cracker or preprocessor executable inside its directory. The server
+/// sends a base name with the extension of the agent's operating system appended
+/// (e.g. `hashcat.bin`, `pp.bin`); when that file is absent the archive ships a
+/// bitness-suffixed variant instead (`hashcat64.bin`, `pp64.bin`), so the agent
+/// inserts the host bitness before the extension and falls back to that.
+///
+/// Returns the suffixed path when neither exists, so a caller which has a
+/// fallback of its own still sees a miss on the path it checks.
 async fn resolve_binary(dir: &Path, executable: &str) -> PathBuf {
     let direct = dir.join(executable);
 
@@ -653,7 +662,7 @@ fn io_at(path: &Path) -> impl FnOnce(io::Error) -> ProvisionError {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiskProvisioner, ProvisionError, Provisioner, absolute, is_plain_filename,
+        DiskProvisioner, ProvisionError, Provisioner, absolute, is_plain_filename, resolve_binary,
         resolve_local_hashcat, with_bitness,
     };
     use crate::client::Client;
@@ -772,6 +781,102 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn announced_binary_name_wins_over_the_bitness_suffixed_one() {
+        let tmp = TempDir::new().unwrap();
+        tokio::fs::write(tmp.path().join("hashcat.bin"), b"x")
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join(with_bitness("hashcat.bin")), b"x")
+            .await
+            .unwrap();
+
+        let resolved = resolve_binary(tmp.path(), "hashcat.bin").await;
+
+        assert_eq!(resolved, tmp.path().join("hashcat.bin"));
+    }
+
+    // An archive which ships only `hashcat64.bin` — the layout hashcat used up
+    // to 5.1.0 — resolves under the announced base name `hashcat.bin`, so a
+    // cracker does not have to be configured with the suffixed name.
+    #[tokio::test]
+    async fn bitness_suffixed_binary_resolves_under_the_announced_name() {
+        let tmp = TempDir::new().unwrap();
+        let suffixed = with_bitness("hashcat.bin");
+        tokio::fs::write(tmp.path().join(&suffixed), b"x")
+            .await
+            .unwrap();
+
+        let resolved = resolve_binary(tmp.path(), "hashcat.bin").await;
+
+        assert_eq!(resolved, tmp.path().join(&suffixed));
+    }
+
+    // With neither name present the suffixed path comes back, so the macOS
+    // hashcat fallback still sees a miss on the path it checks.
+    #[tokio::test]
+    async fn resolution_reports_the_suffixed_path_when_nothing_exists() {
+        let tmp = TempDir::new().unwrap();
+
+        let resolved = resolve_binary(tmp.path(), "hashcat.bin").await;
+
+        assert_eq!(resolved, tmp.path().join(with_bitness("hashcat.bin")));
+        assert!(!resolved.exists());
+    }
+
+    /// Answers `downloadBinary` for a hashcat cracker announced under the plain
+    /// base name, so the resolution inside `ensure_cracker` is what decides
+    /// which file in the cracker directory is used.
+    struct CrackerTransport;
+
+    impl Transport for CrackerTransport {
+        async fn post_json(&self, _body: &Value) -> Result<Value, TransportError> {
+            Ok(serde_json::json!({
+                "action": "downloadBinary",
+                "response": "SUCCESS",
+                "url": "http://unused.invalid/hashcat.7z",
+                "name": "hashcat",
+                "executable": "hashcat.bin",
+            }))
+        }
+    }
+
+    /// Writes an executable stand-in for hashcat which reports a version, all
+    /// `HashcatVersion::probe` needs to build the cracker.
+    #[cfg(unix)]
+    async fn write_fake_hashcat(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        tokio::fs::write(path, b"#!/bin/sh\necho v6.2.6\n")
+            .await
+            .unwrap();
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .await
+            .unwrap();
+    }
+
+    /// A cracker whose archive only holds `hashcat64.bin` is announced by the
+    /// server as `hashcat.bin`: it has to resolve anyway, otherwise a binary
+    /// configured with the plain base name cannot run. The cracker directory
+    /// exists already, so the panicking downloader is never reached.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cracker_shipping_only_the_bitness_suffixed_binary_is_provisioned() {
+        let tmp = TempDir::new().unwrap();
+        let paths = paths_in(tmp.path());
+        let cracker_dir = paths.crackers.join("45");
+        tokio::fs::create_dir_all(&cracker_dir).await.unwrap();
+        write_fake_hashcat(&cracker_dir.join(with_bitness("hashcat.bin"))).await;
+
+        let provisioner = DiskProvisioner::builder(paths, PanicDownloader).build();
+        let client = Client::new(CrackerTransport);
+
+        provisioner
+            .ensure_cracker(&client, 45)
+            .await
+            .expect("the bitness-suffixed binary must resolve under the announced name");
     }
 
     /// A transport and downloader that fail the test if the guard ever lets a
