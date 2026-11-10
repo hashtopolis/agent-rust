@@ -1,6 +1,6 @@
 use crate::cracker::CrackerError;
 use crate::model::{BenchmarkType, ResolvedPreprocessor, TaskAssignment};
-use crate::process;
+use crate::process::{self, Captured};
 
 use crate::backend::args::Args;
 
@@ -112,6 +112,8 @@ async fn run_speed(
 
     log_stderr(&captured.stderr);
 
+    ensure_success(&captured)?;
+
     let mut count_sum: u64 = 0;
     let mut weighted_time: f64 = 0.0;
 
@@ -140,6 +142,22 @@ async fn run_speed(
     )))
 }
 
+/// A speed run that exits non-zero has no trustworthy result, whatever lines it
+/// printed. The Python agent gets the same strictness from
+/// `subprocess.check_output`.
+fn ensure_success(captured: &Captured) -> Result<(), CrackerError> {
+    if captured.status.success() {
+        return Ok(());
+    }
+
+    Err(CrackerError::Process(format!(
+        "speed benchmark failed ({}): {} {}",
+        captured.status,
+        captured.stdout.trim(),
+        captured.stderr.trim()
+    )))
+}
+
 /// Unlike the Python agent, benchmark stderr is logged rather than forwarded to
 /// the server per line: the benchmark path has no progress sink, and the result
 /// (or its absence) is what the server acts on.
@@ -151,5 +169,44 @@ fn log_stderr(stderr: &str) {
         if !line.is_empty() {
             tracing::warn!(line, "hashcat benchmark stderr");
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use crate::backend::hashcat::tests::{cracker, fake_hashcat, task};
+    use crate::cracker::CrackerError;
+
+    use super::run_speed;
+
+    #[tokio::test]
+    async fn a_failed_speed_run_is_an_error_despite_result_lines() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let mut cracker = cracker();
+        cracker.binary_path = fake_hashcat(
+            tmp.path(),
+            "#!/bin/sh\necho '1:166:3998.88'\necho 'device 2 failed' >&2\nexit 255\n",
+        );
+
+        let error = run_speed(&cracker, &task(None), None).await.unwrap_err();
+
+        assert!(
+            matches!(&error, CrackerError::Process(message) if message.contains("exit status: 255")),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_speed_run_sums_counts_and_weights_the_time() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let mut cracker = cracker();
+        cracker.binary_path =
+            fake_hashcat(tmp.path(), "#!/bin/sh\necho '1:100:10'\necho '2:300:20'\n");
+
+        let result = run_speed(&cracker, &task(None), None).await.unwrap();
+
+        assert_eq!(result.as_deref(), Some("400:17.5"));
     }
 }

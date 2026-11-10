@@ -91,6 +91,8 @@ impl HashcatVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::backend::hashcat::tests::fake_hashcat;
 
     #[test]
     fn releases_and_builds_parse() {
@@ -120,17 +122,6 @@ mod tests {
         for version in ["", "hashcat", "v7.1", "v7.x.2", "v7.1.2-invalid"] {
             assert_eq!(HashcatVersion::parse(version), None, "{version}");
         }
-    }
-
-    #[cfg(unix)]
-    fn fake_hashcat(dir: &Path, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = dir.join("hashcat");
-        std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        path
     }
 
     #[cfg(unix)]

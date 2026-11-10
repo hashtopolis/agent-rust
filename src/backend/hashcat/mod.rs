@@ -201,7 +201,7 @@ mod tests {
 
     const CRACKER_ID: u64 = 4;
 
-    fn cracker() -> HashcatCracker {
+    pub(super) fn cracker() -> HashcatCracker {
         HashcatCracker {
             cracker_id: CRACKER_ID,
             binary_path: PathBuf::from("/opt/crackers/4/hashcat.bin"),
@@ -212,7 +212,7 @@ mod tests {
         }
     }
 
-    fn task(brain: Option<BrainConfig>) -> TaskAssignment {
+    pub(super) fn task(brain: Option<BrainConfig>) -> TaskAssignment {
         TaskAssignment {
             task_id: 1,
             cracker_id: CRACKER_ID,
@@ -230,6 +230,19 @@ mod tests {
             preprocessor: None,
             brain,
         }
+    }
+
+    /// An executable shell script standing in for a cracker or preprocessor
+    /// binary, written as `hashcat` into `dir`.
+    #[cfg(unix)]
+    pub(super) fn fake_hashcat(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("hashcat");
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        path
     }
 
     const CHUNK: Chunk = Chunk {
