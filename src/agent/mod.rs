@@ -124,7 +124,10 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             server_version: login_result.server_version,
         };
 
-        Ok(Self::new(client, config, provisioner, session))
+        let agent = Self::new(client, config, provisioner, session);
+        agent.maybe_check_version().await;
+
+        Ok(agent)
     }
 
     pub async fn deregister(self) -> Result<(), AgentError> {

@@ -1,9 +1,9 @@
 use htp_agent::agent::{Agent, AgentError};
-use htp_agent::config::Config;
+use htp_agent::config::{Config, Overrides};
 use serde_json::json;
 
 use crate::support::env::Env;
-use crate::support::provisioner::FakeProvisioner;
+use crate::support::provisioner::{FakeProvisioner, Stage};
 use crate::support::transport::{ScriptedTransport, success};
 
 fn login_reply() -> serde_json::Value {
@@ -73,6 +73,71 @@ async fn existing_token_skips_registration() {
         probe.request_for("updateInformation")["token"],
         "stored-token"
     );
+}
+
+#[tokio::test]
+async fn checks_for_a_client_update() {
+    let env = Env::new().with_token("stored-token");
+
+    let transport = ScriptedTransport::new([
+        success("testConnection"),
+        login_reply(),
+        success("updateInformation"),
+    ]);
+    let provisioner = FakeProvisioner::default();
+    let probe = provisioner.clone();
+
+    Agent::bootstrap(transport, env.config(), provisioner)
+        .await
+        .unwrap();
+
+    assert_eq!(probe.calls(), [Stage::CheckVersion]);
+}
+
+#[tokio::test]
+async fn failed_client_version_check_does_not_abort_bootstrap() {
+    let env = Env::new().with_token("stored-token");
+
+    let transport = ScriptedTransport::new([
+        success("testConnection"),
+        login_reply(),
+        success("updateInformation"),
+    ]);
+    let provisioner = FakeProvisioner::new().failing_at(Stage::CheckVersion);
+    let probe = provisioner.clone();
+
+    let result = Agent::bootstrap(transport, env.config(), provisioner).await;
+
+    assert!(
+        result.is_ok(),
+        "a failed version check must not stop startup"
+    );
+    assert_eq!(probe.calls(), [Stage::CheckVersion]);
+}
+
+#[tokio::test]
+async fn disabled_update_skips_the_client_version_check() {
+    let env = Env::new().with_token("stored-token");
+
+    let overrides = Overrides {
+        disable_update: true,
+        ..Default::default()
+    };
+    let config = Config::load(&env.settings_path, &env.state_path, overrides).unwrap();
+
+    let transport = ScriptedTransport::new([
+        success("testConnection"),
+        login_reply(),
+        success("updateInformation"),
+    ]);
+    let provisioner = FakeProvisioner::default();
+    let probe = provisioner.clone();
+
+    Agent::bootstrap(transport, config, provisioner)
+        .await
+        .unwrap();
+
+    assert!(probe.calls().is_empty());
 }
 
 #[tokio::test]
