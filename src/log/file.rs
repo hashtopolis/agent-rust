@@ -1,9 +1,13 @@
-//! The log file, rotated by size.
+//! The log file: rotated by size and gzip-compressed.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use flate2::Compression;
+use flate2::write::GzEncoder;
 
 use super::warn;
 
@@ -12,7 +16,8 @@ const ROTATION_RETRY: Duration = Duration::from_secs(10);
 
 /// A log file that is rotated before a write would take it past `max_size`.
 /// The live file moves to `.1`, older rotations shift up one, and at most
-/// `max_files` of them are kept.
+/// `max_files` of them are kept. `.1` is compressed to `.1.gz` on a thread of
+/// its own, so writing carries on meanwhile.
 ///
 /// A rotation that fails (on Windows, typically because another program holds
 /// one of the files open) is reported on stderr and retried after
@@ -27,6 +32,7 @@ pub(super) struct RotatingFile {
     /// Set while rotation is failing: when to try again.
     retry_at: Option<Instant>,
     rotation_retry: Duration,
+    compressing: Option<JoinHandle<()>>,
 }
 
 impl RotatingFile {
@@ -43,7 +49,12 @@ impl RotatingFile {
             size: 0,
             retry_at: None,
             rotation_retry: ROTATION_RETRY,
+            compressing: None,
         };
+
+        // A compression cut short by a crash or restart leaves its temporary
+        // file behind; the plain rotation it was made from is still there.
+        remove_if_exists(&log.compression_temp())?;
 
         if let Err(error) = log.remove_extra_rotations() {
             warn(format_args!(
@@ -89,6 +100,9 @@ impl RotatingFile {
             return;
         }
 
+        // `.1` must not move while it is still being compressed.
+        self.finish_compression();
+
         if let Err(error) = self.shift() {
             if self.retry_at.is_none() {
                 warn(format_args!(
@@ -103,27 +117,53 @@ impl RotatingFile {
         }
 
         self.retry_at = None;
+        self.start_compression();
     }
 
     /// Move the live file to `.1`, shifting older rotations up one. Only the
     /// rotations below the first free slot move, so a retry after a failed
     /// rename never pushes another old file out.
     fn shift(&self) -> io::Result<()> {
-        let free = (1..=self.max_files).find(|&n| !self.rotated(n).exists());
+        let free = (1..=self.max_files).find(|&n| !self.occupied(n));
 
         let top = match free {
             Some(n) => n,
             None => {
-                remove_if_exists(&self.rotated(self.max_files))?;
+                self.remove(self.max_files)?;
                 self.max_files
             }
         };
 
         for n in (1..top).rev() {
-            fs::rename(self.rotated(n), self.rotated(n + 1))?;
+            self.move_rotation(n, n + 1)?;
         }
 
-        fs::rename(&self.path, self.rotated(1))
+        fs::rename(&self.path, self.rotated(1, false))
+    }
+
+    fn start_compression(&mut self) {
+        let plain = self.rotated(1, false);
+        let temp = self.compression_temp();
+        let compressed = self.rotated(1, true);
+
+        let spawned = {
+            let (plain, temp, compressed) = (plain.clone(), temp.clone(), compressed.clone());
+
+            thread::Builder::new()
+                .name("log-compress".to_string())
+                .spawn(move || compress_rotation(&plain, &temp, &compressed))
+        };
+
+        match spawned {
+            Ok(handle) => self.compressing = Some(handle),
+            Err(_) => compress_rotation(&plain, &temp, &compressed),
+        }
+    }
+
+    fn finish_compression(&mut self) {
+        if let Some(compressing) = self.compressing.take() {
+            let _ = compressing.join();
+        }
     }
 
     /// Remove rotations numbered above `max_files`, left over from a higher
@@ -144,9 +184,11 @@ impl RotatingFile {
             let entry = entry?;
             let file_name = entry.file_name();
 
-            let Some(number) = file_name.to_str().and_then(|n| n.strip_prefix(&prefix)) else {
+            let Some(suffix) = file_name.to_str().and_then(|n| n.strip_prefix(&prefix)) else {
                 continue;
             };
+
+            let number = suffix.strip_suffix(".gz").unwrap_or(suffix);
 
             if number.parse::<usize>().is_ok_and(|n| n > self.max_files) {
                 fs::remove_file(entry.path())?;
@@ -156,11 +198,38 @@ impl RotatingFile {
         Ok(())
     }
 
-    fn rotated(&self, n: usize) -> PathBuf {
-        let mut name = self.path.as_os_str().to_os_string();
-        name.push(format!(".{n}"));
+    /// A rotation may be plain (its compression failed) or compressed.
+    fn occupied(&self, n: usize) -> bool {
+        self.rotated(n, false).exists() || self.rotated(n, true).exists()
+    }
 
-        PathBuf::from(name)
+    fn remove(&self, n: usize) -> io::Result<()> {
+        remove_if_exists(&self.rotated(n, false))?;
+        remove_if_exists(&self.rotated(n, true))
+    }
+
+    fn move_rotation(&self, from: usize, to: usize) -> io::Result<()> {
+        let compressed = self.rotated(from, true);
+
+        if compressed.exists() {
+            // A plain copy next to it is one whose deletion failed after it
+            // was compressed; the compressed one is complete.
+            remove_if_exists(&self.rotated(from, false))?;
+
+            return fs::rename(compressed, self.rotated(to, true));
+        }
+
+        fs::rename(self.rotated(from, false), self.rotated(to, false))
+    }
+
+    fn rotated(&self, n: usize, compressed: bool) -> PathBuf {
+        let extension = if compressed { ".gz" } else { "" };
+
+        with_suffix(&self.path, &format!(".{n}{extension}"))
+    }
+
+    fn compression_temp(&self) -> PathBuf {
+        with_suffix(&self.path, ".1.gz.tmp")
     }
 }
 
@@ -186,6 +255,42 @@ impl Write for RotatingFile {
     }
 }
 
+/// Compress a rotation, keeping it uncompressed if that fails.
+fn compress_rotation(plain: &Path, temp: &Path, compressed: &Path) {
+    if let Err(error) = compress(plain, temp, compressed) {
+        warn(format_args!(
+            "cannot compress rotated log file {}: {error}; keeping it uncompressed",
+            plain.display()
+        ));
+    }
+}
+
+/// Compress `plain` into `compressed` through `temp`, so an interrupted run
+/// never leaves a truncated `.gz` behind.
+fn compress(plain: &Path, temp: &Path, compressed: &Path) -> io::Result<()> {
+    let written = (|| {
+        let mut encoder = GzEncoder::new(File::create(temp)?, Compression::fast());
+        io::copy(&mut File::open(plain)?, &mut encoder)?;
+        encoder.finish()?;
+
+        fs::rename(temp, compressed)
+    })();
+
+    if written.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+
+    written?;
+    fs::remove_file(plain)
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+
+    PathBuf::from(name)
+}
+
 fn remove_if_exists(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -197,6 +302,9 @@ fn remove_if_exists(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    use std::io::Read;
+
+    use flate2::read::GzDecoder;
     use tempfile::TempDir;
 
     struct Fixture {
@@ -228,6 +336,24 @@ mod tests {
             fs::read_to_string(self.rotated(&n.to_string())).unwrap()
         }
 
+        fn compressed(&self, n: usize) -> String {
+            let mut text = String::new();
+            GzDecoder::new(File::open(self.rotated(&format!("{n}.gz"))).unwrap())
+                .read_to_string(&mut text)
+                .unwrap();
+
+            text
+        }
+
+        fn write_gz(&self, n: usize, text: &str) {
+            let mut encoder = GzEncoder::new(
+                File::create(self.rotated(&format!("{n}.gz"))).unwrap(),
+                Compression::default(),
+            );
+            encoder.write_all(text.as_bytes()).unwrap();
+            encoder.finish().unwrap();
+        }
+
         fn files(&self) -> Vec<String> {
             let mut names: Vec<String> = fs::read_dir(self.dir.path())
                 .unwrap()
@@ -239,6 +365,13 @@ mod tests {
         }
     }
 
+    /// Wait for the background compression of the latest rotation.
+    fn settle(log: &mut RotatingFile) {
+        if let Some(compressing) = log.compressing.take() {
+            compressing.join().unwrap();
+        }
+    }
+
     #[test]
     fn rotates_before_a_line_would_cross_the_limit_and_never_splits_one() {
         let fixture = Fixture::new();
@@ -246,10 +379,11 @@ mod tests {
 
         log.write_all(b"12345\n").unwrap();
         log.write_all(b"abcdef\n").unwrap();
+        settle(&mut log);
 
         assert_eq!(fixture.live(), "abcdef\n");
-        assert_eq!(fixture.plain(1), "12345\n");
-        assert_eq!(fixture.files(), ["agent.log", "agent.log.1"]);
+        assert_eq!(fixture.compressed(1), "12345\n");
+        assert_eq!(fixture.files(), ["agent.log", "agent.log.1.gz"]);
     }
 
     #[test]
@@ -259,8 +393,9 @@ mod tests {
 
         log.write_all(b"too long\n").unwrap();
         log.write_all(b"x\n").unwrap();
+        settle(&mut log);
 
-        assert_eq!(fixture.plain(1), "too long\n");
+        assert_eq!(fixture.compressed(1), "too long\n");
         assert_eq!(fixture.live(), "x\n");
     }
 
@@ -275,8 +410,9 @@ mod tests {
         assert_eq!(fixture.live(), "earlier\n0123456789\n");
 
         log.write_all(b"abc\n").unwrap();
+        settle(&mut log);
 
-        assert_eq!(fixture.plain(1), "earlier\n0123456789\n");
+        assert_eq!(fixture.compressed(1), "earlier\n0123456789\n");
         assert_eq!(fixture.live(), "abc\n");
     }
 
@@ -289,10 +425,15 @@ mod tests {
             log.write_all(line.as_bytes()).unwrap();
         }
 
+        settle(&mut log);
+
         assert_eq!(fixture.live(), "d\n");
-        assert_eq!(fixture.plain(1), "c\n");
-        assert_eq!(fixture.plain(2), "b\n");
-        assert_eq!(fixture.files(), ["agent.log", "agent.log.1", "agent.log.2"]);
+        assert_eq!(fixture.compressed(1), "c\n");
+        assert_eq!(fixture.compressed(2), "b\n");
+        assert_eq!(
+            fixture.files(),
+            ["agent.log", "agent.log.1.gz", "agent.log.2.gz"]
+        );
     }
 
     #[test]
@@ -309,6 +450,33 @@ mod tests {
     }
 
     #[test]
+    fn a_stray_compression_temp_file_is_removed_on_open() {
+        let fixture = Fixture::new();
+        fs::write(fixture.rotated("1.gz.tmp"), "half a gzip").unwrap();
+
+        fixture.open(10, 5);
+
+        assert_eq!(fixture.files(), ["agent.log"]);
+    }
+
+    #[test]
+    fn a_rotation_left_uncompressed_shifts_along_with_the_rest() {
+        let fixture = Fixture::new();
+        fs::write(&fixture.path, "c\n").unwrap();
+        fs::write(fixture.rotated("1"), "b\n").unwrap();
+        fixture.write_gz(2, "a\n");
+        let mut log = fixture.open(2, 3);
+
+        log.write_all(b"d\n").unwrap();
+        settle(&mut log);
+
+        assert_eq!(fixture.live(), "d\n");
+        assert_eq!(fixture.compressed(1), "c\n");
+        assert_eq!(fixture.plain(2), "b\n");
+        assert_eq!(fixture.compressed(3), "a\n");
+    }
+
+    #[test]
     fn a_rotation_deleted_from_outside_leaves_a_gap_that_is_filled_first() {
         let fixture = Fixture::new();
         let mut log = fixture.open(2, 3);
@@ -317,14 +485,16 @@ mod tests {
             log.write_all(line.as_bytes()).unwrap();
         }
 
-        fs::remove_file(fixture.rotated("2")).unwrap();
+        settle(&mut log);
+        fs::remove_file(fixture.rotated("2.gz")).unwrap();
         log.write_all(b"e\n").unwrap();
+        settle(&mut log);
 
         // Only `.1` moves up into the gap; `.3` stays where it was.
         assert_eq!(fixture.live(), "e\n");
-        assert_eq!(fixture.plain(1), "d\n");
-        assert_eq!(fixture.plain(2), "c\n");
-        assert_eq!(fixture.plain(3), "a\n");
+        assert_eq!(fixture.compressed(1), "d\n");
+        assert_eq!(fixture.compressed(2), "c\n");
+        assert_eq!(fixture.compressed(3), "a\n");
     }
 
     #[cfg(unix)]
@@ -345,6 +515,8 @@ mod tests {
             log.write_all(line.as_bytes()).unwrap();
         }
 
+        settle(&mut log);
+
         let set_mode = |mode| {
             fs::set_permissions(fixture.dir.path(), fs::Permissions::from_mode(mode)).unwrap()
         };
@@ -355,29 +527,49 @@ mod tests {
         set_mode(0o755);
 
         assert_eq!(fixture.live(), "c\nd\ne\n");
-        assert_eq!(fixture.plain(1), "b\n");
-        assert_eq!(fixture.plain(2), "a\n");
+        assert_eq!(fixture.compressed(1), "b\n");
+        assert_eq!(fixture.compressed(2), "a\n");
 
         log.write_all(b"f\n").unwrap();
+        settle(&mut log);
 
         assert_eq!(fixture.live(), "f\n");
-        assert_eq!(fixture.plain(1), "c\nd\ne\n");
-        assert_eq!(fixture.plain(2), "b\n");
+        assert_eq!(fixture.compressed(1), "c\nd\ne\n");
+        assert_eq!(fixture.compressed(2), "b\n");
     }
 
     #[test]
     fn rotations_beyond_max_files_are_removed_on_open() {
         let fixture = Fixture::new();
-        fs::write(fixture.rotated("1"), "c\n").unwrap();
-        fs::write(fixture.rotated("2"), "b\n").unwrap();
-        fs::write(fixture.rotated("4"), "a\n").unwrap();
+        fixture.write_gz(1, "c\n");
+        fixture.write_gz(2, "b\n");
+        fixture.write_gz(4, "a\n");
+        fs::write(fixture.rotated("3"), "plain\n").unwrap();
         fs::write(fixture.rotated("old"), "not a rotation\n").unwrap();
 
         fixture.open(10, 1);
 
         assert_eq!(
             fixture.files(),
-            ["agent.log", "agent.log.1", "agent.log.old"]
+            ["agent.log", "agent.log.1.gz", "agent.log.old"]
+        );
+    }
+
+    #[test]
+    fn a_rotation_kept_both_plain_and_compressed_moves_on_compressed_only() {
+        let fixture = Fixture::new();
+        fs::write(&fixture.path, "c\n").unwrap();
+        fs::write(fixture.rotated("1"), "b\n").unwrap();
+        fixture.write_gz(1, "b\n");
+        let mut log = fixture.open(2, 3);
+
+        log.write_all(b"d\n").unwrap();
+        settle(&mut log);
+
+        assert_eq!(fixture.compressed(2), "b\n");
+        assert_eq!(
+            fixture.files(),
+            ["agent.log", "agent.log.1.gz", "agent.log.2.gz"]
         );
     }
 
@@ -390,12 +582,14 @@ mod tests {
             log.write_all(line.as_bytes()).unwrap();
         }
 
+        settle(&mut log);
         fs::remove_file(&fixture.path).unwrap();
         log.write_all(b"c\n").unwrap();
+        settle(&mut log);
 
         assert_eq!(fixture.live(), "c\n");
-        assert_eq!(fixture.plain(1), "a\n");
-        assert_eq!(fixture.files(), ["agent.log", "agent.log.1"]);
+        assert_eq!(fixture.compressed(1), "a\n");
+        assert_eq!(fixture.files(), ["agent.log", "agent.log.1.gz"]);
     }
 
     #[cfg(unix)]
@@ -420,6 +614,7 @@ mod tests {
         log.write_all(b"b\n").unwrap();
         set_mode(0o755);
         log.write_all(b"c\n").unwrap();
+        settle(&mut log);
 
         // The rename would work again, but the retry interval has not passed.
         assert_eq!(fixture.live(), "a\nb\nc\n");
