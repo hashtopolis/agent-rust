@@ -37,6 +37,7 @@ src/
   client.rs        # typed server API: getFileStatus, getTask, getChunk, ...
   config.rs        # typesafe config
   cracker.rs       # Cracker trait + factory (chooses backend)
+  digest.rs        # RFC 9530 Repr-Digest parsing (the server's blake3 checksum)
   download.rs      # Downloader trait + reqwest impl: url -> file on disk
   identity.rs      # agent type, version and client signature
   process.rs       # process helpers, stdio stream handling / reporting
@@ -88,7 +89,8 @@ tests/
 - **cli.rs** — clap argument parser; maps flags to config `Overrides`.
 - **cracker.rs** — defines the `Cracker` trait and a factory that selects the hashcat or generic backend, forwarding the auto-pipe policy (derived from config, threaded via the provisioner) to the hashcat backend.
 - **provisioner.rs** — the `Provisioner` trait plus its on-disk implementation. Everything the `Client` does not cover: crackers, preprocessors, task files, hashlists and founds fetched and placed where the backend expects them. A trait so the loop can run against a fake. The associated `Cracker` type lets that fake hand the loop a fake cracker.
-- **download.rs** — the `Downloader` trait and its reqwest implementation: a url streamed to a path. Separate from `transport.rs` because the JSON API is one POST endpoint while assets are GETs against arbitrary urls with no useful request timeout.
+- **download.rs** — the `Downloader` trait and its reqwest implementation: a url streamed to a path. Separate from `transport.rs` because the JSON API is one POST endpoint while assets are GETs against arbitrary urls with no useful request timeout. When a response advertises a blake3 digest in its `Repr-Digest` header the stream is hashed as it is written and a mismatch deletes the file and fails the download; with no such header nothing is hashed and the provisioner's size comparison stays the only check, which is still the case for a task file satisfied over rsync.
+- **digest.rs** — reads the blake3 member out of an RFC 9530 `Repr-Digest` field value (`blake3=:<base64 of 32 bytes>:`). The server sends it only once its checksum job has computed the file's hash, so "no digest to verify" is a normal outcome rather than an error, and a member the agent cannot read warns and degrades to the size check rather than failing: anything able to tamper with the body could strip the header instead.
 - **http.rs** - turns the `server` config section into validated `HttpSettings` (client certificate, proxy, basic auth) at startup. Both the transport and the downloader build their reqwest client from it; only the transport adds a timeout. Basic auth goes on every API call, but on downloads only for the server's own origin.
 - **archive.rs**: in-process 7z extraction via `sevenz-rust2`. `extract_into` drops an archive's contents at the destination root (wordlists); `extract_flattened` collapses a single wrapping folder (crackers, preprocessors).
 - **identity.rs** — what this build calls itself: agent type, version, and the `clientSignature` sent on login.
@@ -110,7 +112,7 @@ tests/
 - **config.rs** — typesafe config, no string-keyed lookups. Two files with distinct owners: `config.json` holds the user's settings and is **only ever read** by the agent (so it is safe to re-read every loop iteration, and hand edits survive); `state.json` is agent-owned and holds the token and uuid, rewritten atomically when either changes. CLI flags live in `Overrides`, applied over the settings on load and re-applied after every reload, and are never persisted back.
 - **sysinfo.rs** — OS and device inventory for registration / status reporting.
 - **process.rs** — spawning child processes, streaming stdio, reporting.
-- **update.rs**: self-update. On a `checkClientVersion` "NEW" reply the agent downloads the server's `rust-agent.zip`, reads `manifest.json`, picks the binary whose `triples` include this build's `agent_target()`, swaps the running executable (`self-replace`) and re-execs. Opt-out via `behavior.disable_update`. Integrity rests on the TLS download: the endpoint carries no hash, so there is no signature check yet.
+- **update.rs**: self-update. On a `checkClientVersion` "NEW" reply the agent downloads the server's `rust-agent.zip`, reads `manifest.json`, picks the binary whose `triples` include this build's `agent_target()`, swaps the running executable (`self-replace`) and re-execs. Opt-out via `behavior.disable_update`. Integrity rests on the TLS download: the endpoint sends no `Repr-Digest` and the manifest carries no hash, so there is no signature check yet. A server that did checksum `rust-agent.zip` would be honoured for free, since the check lives in the downloader.
 
 ## Open questions / notes
 
