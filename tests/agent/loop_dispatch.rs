@@ -101,6 +101,49 @@ async fn keyspace_required_measures_and_sends_keyspace() {
 }
 
 #[tokio::test]
+async fn failed_keyspace_measure_reports_the_error_and_backs_off() {
+    let mut rig = AgentRig::with_provisioner(
+        [
+            task_reply(25, 45, 13),
+            chunk_status("keyspace_required"),
+            success("clientError"),
+        ],
+        FakeProvisioner::new().with_cracker(FakeCracker {
+            keyspace_fails: true,
+            ..FakeCracker::default()
+        }),
+    );
+
+    let step = rig.tick().await.unwrap();
+
+    let actions = rig.transport.actions();
+    assert_eq!(step, Step::Sleep(Duration::from_secs(5)));
+    assert!(rig.state.current_task().is_none());
+    assert!(actions.contains(&"clientError".to_string()));
+    assert!(!actions.contains(&"sendKeyspace".to_string()));
+}
+
+#[tokio::test]
+async fn rejected_keyspace_backs_off() {
+    let mut rig = AgentRig::with_provisioner(
+        [
+            task_reply(25, 45, 13),
+            chunk_status("keyspace_required"),
+            json!({"action": "sendKeyspace", "response": "ERROR", "message": "nope"}),
+        ],
+        FakeProvisioner::new().with_cracker(FakeCracker {
+            keyspace: 568_000,
+            ..FakeCracker::default()
+        }),
+    );
+
+    let step = rig.tick().await.unwrap();
+
+    assert_eq!(step, Step::Sleep(Duration::from_secs(5)));
+    assert!(rig.state.current_task().is_none());
+}
+
+#[tokio::test]
 async fn benchmark_required_sends_benchmark() {
     let mut rig = AgentRig::rig([
         task_reply(25, 45, 13),

@@ -244,9 +244,15 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
                     if matches!(error, AgentError::TokenRejected) {
                         return Err(error);
                     }
+
                     tracing::error!(%error, "keyspace measurement failed");
                     state.reset_task();
+
+                    // Retrying at once would hammer the server and respawn the
+                    // cracker for a failure that is unlikely to have cleared.
+                    return Ok(Step::Sleep(RETRY_DELAY));
                 }
+
                 Ok(Step::Continue)
             }
             GetChunkResponse::BenchmarkRequired => {

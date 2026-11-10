@@ -14,6 +14,7 @@ use htp_agent::transport::Transport;
 #[derive(Clone)]
 pub struct FakeCracker {
     pub keyspace: u64,
+    pub keyspace_fails: bool,
     pub benchmark: Option<String>,
 }
 
@@ -21,6 +22,7 @@ impl Default for FakeCracker {
     fn default() -> Self {
         Self {
             keyspace: 0,
+            keyspace_fails: false,
             benchmark: Some("674:674.74".to_string()),
         }
     }
@@ -32,6 +34,10 @@ impl Cracker for FakeCracker {
         _task: &TaskAssignment,
         _preprocessor: Option<&ResolvedPreprocessor>,
     ) -> Result<Option<u64>, CrackerError> {
+        if self.keyspace_fails {
+            return Err(CrackerError::Process("keyspace run failed".into()));
+        }
+
         Ok(Some(self.keyspace))
     }
 
