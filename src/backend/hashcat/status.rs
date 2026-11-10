@@ -121,9 +121,10 @@ impl HashcatStatus {
         self.valid
     }
 
-    /// The server-facing state is hashcat's status code minus one.
+    /// The server-facing state is hashcat's raw status code, kept in sync with
+    /// the server's DHashcatStatus enum.
     pub fn state(&self) -> u32 {
-        (self.status - 1).max(0) as u32
+        self.status.max(0) as u32
     }
 
     pub fn curku(&self) -> u64 {
@@ -202,7 +203,7 @@ mod tests {
         let status = HashcatStatus::parse(line);
 
         assert!(status.is_valid());
-        assert_eq!(status.state(), 2);
+        assert_eq!(status.state(), 3);
         assert_eq!(status.curku(), 2048);
         assert_eq!(status.progress(), 5000);
         assert_eq!(status.progress_total(), 10000);
