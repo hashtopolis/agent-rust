@@ -417,7 +417,7 @@ impl ChunkRun {
         ProgressReport {
             chunk_id: self.chunk.id,
             keyspace_progress: self.chunk.skip,
-            state: 2,
+            state: ProgressReport::STATE_RUNNING,
             ..Default::default()
         }
     }
