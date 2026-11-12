@@ -829,8 +829,10 @@ mod tests {
     /// Answers `downloadBinary` for a hashcat cracker announced under the plain
     /// base name, so the resolution inside `ensure_cracker` is what decides
     /// which file in the cracker directory is used.
+    #[cfg(unix)]
     struct CrackerTransport;
 
+    #[cfg(unix)]
     impl Transport for CrackerTransport {
         async fn post_json(&self, _body: &Value) -> Result<Value, TransportError> {
             Ok(serde_json::json!({
