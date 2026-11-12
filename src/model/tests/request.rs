@@ -1,5 +1,5 @@
 use crate::model::raw::{BinaryType, Request};
-use crate::model::{BenchmarkType, Crack, Os};
+use crate::model::{BenchmarkType, Crack, Os, ProgressReport};
 use serde_json::json;
 
 #[test]
@@ -254,7 +254,7 @@ fn send_progress_mixes_field_and_raw_cracks() {
         keyspace_progress: 0,
         relative_progress: 0,
         speed: 0,
-        state: 3,
+        state: ProgressReport::STATE_RUNNING,
         cracks: vec![
             Crack::Fields(vec!["hash".to_string(), "plain".to_string()]),
             Crack::Raw("otherhash:otherplain".to_string()),

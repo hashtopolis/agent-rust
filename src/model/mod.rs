@@ -191,6 +191,13 @@ pub struct ProgressReport {
     pub cpu_util: Option<Vec<f64>>,
 }
 
+/// Values for `ProgressReport::state`, matching hashcat's status codes and the
+/// server's `DHashcatStatus`.
+impl ProgressReport {
+    pub const STATE_RUNNING: u32 = 3;
+    pub const STATE_EXHAUSTED: u32 = 5;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendProgressResponse {
     Continue {

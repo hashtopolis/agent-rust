@@ -193,6 +193,7 @@ pub(super) fn strip_ansi(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ProgressReport;
 
     #[test]
     fn parses_a_full_status_line() {
@@ -203,7 +204,7 @@ mod tests {
         let status = HashcatStatus::parse(line);
 
         assert!(status.is_valid());
-        assert_eq!(status.state(), 3);
+        assert_eq!(status.state(), ProgressReport::STATE_RUNNING);
         assert_eq!(status.curku(), 2048);
         assert_eq!(status.progress(), 5000);
         assert_eq!(status.progress_total(), 10000);
