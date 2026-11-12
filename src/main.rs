@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 
 use htp_agent::agent::{Agent, deregister};
 use htp_agent::backend::hashcat::AutoPipePolicy;
+use htp_agent::banner::Banner;
 use htp_agent::cli::Cli;
 use htp_agent::client::Client;
 use htp_agent::config::{Config, Settings};
@@ -82,6 +83,16 @@ async fn run(cli: Cli) -> Result<()> {
             .rsync_mount(rsync_mount)
             .build()
     };
+
+    let config_path = std::path::absolute(&cli.config).unwrap_or(cli.config);
+
+    print!(
+        "{}",
+        Banner {
+            settings: config.settings(),
+            config_path: &config_path,
+        }
+    );
 
     let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
     agent.run().await?;

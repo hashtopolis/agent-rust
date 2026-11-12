@@ -336,7 +336,7 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
         }
     }
 
-    async fn maybe_check_version(&self) {
+    pub(super) async fn maybe_check_version(&self) {
         if self.config.settings().behavior.disable_update {
             return;
         }
