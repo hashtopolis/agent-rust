@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::level_filters::LevelFilter;
 use uuid::Uuid;
 
 pub const DEFAULT_SETTINGS_FILE: &str = "config.json";
@@ -51,7 +52,7 @@ pub enum ConfigError {
     )]
     MissingVoucher { path: PathBuf },
     #[error(
-        "--log-max-size and --log-max-files need a log file: set log.file in {} or pass --log-file",
+        "--log-max-size, --log-max-files and --log-file-level need a log file: set log.file in {} or pass --log-file",
         path.display()
     )]
     LogOptionsWithoutFile { path: PathBuf },
@@ -207,6 +208,9 @@ pub struct LogFileConfig {
     pub max_size: ByteSize,
     #[serde(default = "LogFileConfig::default_max_files")]
     pub max_files: NonZeroUsize,
+    /// Without one the file gets what the console gets.
+    #[serde(default)]
+    pub level: Option<LogLevel>,
 }
 
 impl LogFileConfig {
@@ -215,6 +219,7 @@ impl LogFileConfig {
             file,
             max_size: Self::default_max_size(),
             max_files: Self::default_max_files(),
+            level: None,
         }
     }
 
@@ -224,6 +229,115 @@ impl LogFileConfig {
 
     fn default_max_files() -> NonZeroUsize {
         NonZeroUsize::new(5).expect("non-zero")
+    }
+}
+
+/// How verbose the agent's own logging should be when `RUST_LOG` is unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verbosity {
+    Normal,
+    Debug,
+    Trace,
+}
+
+impl Verbosity {
+    const ALL: [Self; 3] = [Self::Normal, Self::Debug, Self::Trace];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+
+    /// Case-insensitive like the filter syntax, where `TRACE` would otherwise
+    /// turn every dependency up to trace as well.
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|verbosity| verbosity.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// `normal`, `debug` or `trace` as with the console flags, or a
+/// `RUST_LOG`-style filter such as `htp_agent=trace,hyper=debug`. A target in
+/// a filter needs its level spelled out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum LogLevel {
+    Verbosity(Verbosity),
+    Filter(String),
+}
+
+#[derive(Debug, Error)]
+pub enum LogLevelError {
+    #[error("empty log level: expected normal, debug, trace or a filter")]
+    Empty,
+    #[error(
+        "unknown log level {0:?}: expected normal, debug, trace or a filter such as htp_agent=debug"
+    )]
+    UnknownLevel(String),
+    #[error("invalid log filter {text:?}: {source}")]
+    InvalidFilter {
+        text: String,
+        #[source]
+        source: tracing_subscriber::filter::ParseError,
+    },
+}
+
+impl FromStr for LogLevel {
+    type Err = LogLevelError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let text = text.trim();
+
+        if text.is_empty() {
+            return Err(LogLevelError::Empty);
+        }
+
+        if let Some(verbosity) = Verbosity::from_name(text) {
+            return Ok(Self::Verbosity(verbosity));
+        }
+
+        if let Some(word) = text
+            .split(',')
+            .map(str::trim)
+            .find(|part| is_bare_target(part))
+        {
+            return Err(LogLevelError::UnknownLevel(word.to_string()));
+        }
+
+        match tracing_subscriber::EnvFilter::builder().parse(text) {
+            Ok(_) => Ok(Self::Filter(text.to_string())),
+            Err(source) => Err(LogLevelError::InvalidFilter {
+                text: text.to_string(),
+                source,
+            }),
+        }
+    }
+}
+
+/// The filter syntax takes a word that is not a level for a target with every
+/// level enabled, so a mistyped `trce` would leave the log file empty.
+fn is_bare_target(directive: &str) -> bool {
+    !directive.is_empty() && !directive.contains('=') && directive.parse::<LevelFilter>().is_err()
+}
+
+impl TryFrom<String> for LogLevel {
+    type Error = LogLevelError;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        text.parse()
+    }
+}
+
+impl From<LogLevel> for String {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Verbosity(verbosity) => verbosity.name().to_string(),
+            LogLevel::Filter(filter) => filter,
+        }
     }
 }
 
@@ -351,6 +465,7 @@ pub struct Overrides {
     pub log_file: Option<PathBuf>,
     pub log_max_size: Option<ByteSize>,
     pub log_max_files: Option<NonZeroUsize>,
+    pub log_file_level: Option<LogLevel>,
 }
 
 impl Overrides {
@@ -428,11 +543,15 @@ impl Overrides {
             if let Some(max_files) = self.log_max_files {
                 log.max_files = max_files;
             }
+
+            if let Some(level) = self.log_file_level {
+                log.level = Some(level);
+            }
         }
     }
 
     fn needs_log_file(&self) -> bool {
-        self.log_max_size.is_some() || self.log_max_files.is_some()
+        self.log_max_size.is_some() || self.log_max_files.is_some() || self.log_file_level.is_some()
     }
 }
 
@@ -684,6 +803,7 @@ mod tests {
                 file: PathBuf::from("/var/log/htp-agent.log"),
                 max_size: "500KB".parse().unwrap(),
                 max_files: NonZeroUsize::new(3).unwrap(),
+                level: Some("htp_agent=trace,hyper=debug".parse().unwrap()),
             }),
         };
 
@@ -1031,6 +1151,7 @@ mod tests {
         assert_eq!(log.file, PathBuf::from("agent.log"));
         assert_eq!(log.max_size.bytes(), 10_485_760);
         assert_eq!(log.max_files.get(), 5);
+        assert_eq!(log.level, None);
     }
 
     #[test]
@@ -1056,6 +1177,8 @@ mod tests {
             r#"{ "file": "agent.log", "max_size": "10XB" }"#,
             r#"{ "file": "agent.log", "max_size": 0 }"#,
             r#"{ "max_size": "10MB" }"#,
+            r#"{ "file": "agent.log", "level": "htp_agent=loud" }"#,
+            r#"{ "file": "agent.log", "level": "trce" }"#,
         ] {
             let fixture = Fixture::new();
             fixture.write_settings(&format!(r#"{{ "log": {log} }}"#));
@@ -1087,7 +1210,7 @@ mod tests {
     fn log_overrides_win_over_the_file() {
         let fixture = Fixture::new();
         fixture.write_settings(
-            r#"{ "log": { "file": "from-file.log", "max_size": "1MB", "max_files": 2 } }"#,
+            r#"{ "log": { "file": "from-file.log", "max_size": "1MB", "max_files": 2, "level": "debug" } }"#,
         );
 
         let config = fixture
@@ -1095,6 +1218,7 @@ mod tests {
                 log_file: Some(PathBuf::from("from-cli.log")),
                 log_max_size: Some("20MB".parse().unwrap()),
                 log_max_files: Some(NonZeroUsize::new(9).unwrap()),
+                log_file_level: Some(LogLevel::Verbosity(Verbosity::Trace)),
                 ..Overrides::default()
             })
             .unwrap();
@@ -1103,6 +1227,7 @@ mod tests {
         assert_eq!(log.file, PathBuf::from("from-cli.log"));
         assert_eq!(log.max_size.bytes(), 20_971_520);
         assert_eq!(log.max_files.get(), 9);
+        assert_eq!(log.level, Some(LogLevel::Verbosity(Verbosity::Trace)));
     }
 
     #[test]
@@ -1133,6 +1258,10 @@ mod tests {
                 log_max_size: Some("1MB".parse().unwrap()),
                 ..Overrides::default()
             },
+            Overrides {
+                log_file_level: Some(LogLevel::Verbosity(Verbosity::Trace)),
+                ..Overrides::default()
+            },
         ] {
             let fixture = Fixture::new();
 
@@ -1147,5 +1276,75 @@ mod tests {
             assert!(message.contains("pass --log-file"), "{message}");
             assert!(message.contains(DEFAULT_SETTINGS_FILE), "{message}");
         }
+    }
+
+    #[test]
+    fn log_levels_take_a_verbosity_word_or_a_filter() {
+        for (text, level) in [
+            ("normal", LogLevel::Verbosity(Verbosity::Normal)),
+            ("debug", LogLevel::Verbosity(Verbosity::Debug)),
+            ("trace", LogLevel::Verbosity(Verbosity::Trace)),
+            ("TRACE", LogLevel::Verbosity(Verbosity::Trace)),
+            (" Debug ", LogLevel::Verbosity(Verbosity::Debug)),
+            (
+                "htp_agent=trace,hyper=debug",
+                LogLevel::Filter("htp_agent=trace,hyper=debug".to_string()),
+            ),
+            (
+                "warn,htp_agent=trace",
+                LogLevel::Filter("warn,htp_agent=trace".to_string()),
+            ),
+        ] {
+            assert_eq!(text.parse::<LogLevel>().unwrap(), level, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_word_that_is_no_level_is_rejected_instead_of_taken_for_a_target() {
+        for (text, word) in [
+            ("trce", "trce"),
+            ("debg", "debg"),
+            ("hyper", "hyper"),
+            ("inf,htp_agent=debug", "inf"),
+            ("htp_agent=debug,wrn", "wrn"),
+        ] {
+            let error = text.parse::<LogLevel>().unwrap_err();
+
+            assert!(
+                matches!(&error, LogLevelError::UnknownLevel(unknown) if unknown == word),
+                "{text}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_log_level_is_rejected() {
+        for text in ["", "  "] {
+            let error = text.parse::<LogLevel>().unwrap_err();
+
+            assert!(matches!(error, LogLevelError::Empty), "{text:?}: {error:?}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_log_filter_is_rejected_with_its_cause() {
+        let error = "htp_agent=loud".parse::<LogLevel>().unwrap_err();
+
+        assert!(
+            matches!(error, LogLevelError::InvalidFilter { .. }),
+            "{error:?}"
+        );
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn the_log_level_is_read_from_the_log_section() {
+        let fixture = Fixture::new();
+        fixture.write_settings(r#"{ "log": { "file": "agent.log", "level": "trace" } }"#);
+
+        let config = fixture.load(Overrides::default()).unwrap();
+
+        let log = config.settings().log.as_ref().unwrap();
+        assert_eq!(log.level, Some(LogLevel::Verbosity(Verbosity::Trace)));
     }
 }

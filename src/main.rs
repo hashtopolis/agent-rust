@@ -8,10 +8,10 @@ use htp_agent::backend::hashcat::AutoPipePolicy;
 use htp_agent::banner::Banner;
 use htp_agent::cli::Cli;
 use htp_agent::client::Client;
-use htp_agent::config::{Config, Settings};
+use htp_agent::config::{Config, Settings, Verbosity};
 use htp_agent::download::HttpDownloader;
 use htp_agent::http::HttpSettings;
-use htp_agent::log::Verbosity;
+use htp_agent::log::RawPrinter;
 use htp_agent::provisioner::DiskProvisioner;
 use htp_agent::transport::HttpTransport;
 use htp_agent::update::PendingRestart;
@@ -34,8 +34,8 @@ fn main() -> ExitCode {
         Err(_) => cli.log_file_from_flags(),
     };
 
-    let log = match htp_agent::log::init(verbosity, log_file.as_ref()) {
-        Ok(log) => log,
+    let (printer, log) = match htp_agent::log::init(verbosity, log_file.as_ref()) {
+        Ok(handles) => handles,
         Err(error) => return failed(error),
     };
 
@@ -44,7 +44,7 @@ fn main() -> ExitCode {
         Err(error) => return failed(error),
     };
 
-    match run(&cli, config) {
+    match run(&cli, config, &printer) {
         Ok(Exit::Shutdown) => ExitCode::SUCCESS,
         Ok(Exit::Restart(update)) => {
             tracing::info!("restarting into the installed update");
@@ -69,7 +69,7 @@ fn failed(reason: impl fmt::Display) -> ExitCode {
 /// returns, which ends every task (and the crackers they started), so a restart
 /// begins from a settled process.
 #[tokio::main]
-async fn run(cli: &Cli, config: Config) -> Result<Exit<PendingRestart>> {
+async fn run(cli: &Cli, config: Config, printer: &RawPrinter) -> Result<Exit<PendingRestart>> {
     let url = config.require_url()?;
     let http = HttpSettings::from_server(&config.settings().server)?;
 
@@ -118,13 +118,10 @@ async fn run(cli: &Cli, config: Config) -> Result<Exit<PendingRestart>> {
 
     let config_path = std::path::absolute(&cli.config).unwrap_or_else(|_| cli.config.clone());
 
-    print!(
-        "{}",
-        Banner {
-            settings: config.settings(),
-            config_path: &config_path,
-        }
-    );
+    printer.print(Banner {
+        settings: config.settings(),
+        config_path: &config_path,
+    });
 
     let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
 

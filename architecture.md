@@ -48,9 +48,9 @@ src/
 
   log/
     mod.rs         # logging module list and re-exports
-    subscriber.rs  # tracing subscriber: console and log file layers, Verbosity, RUST_LOG
+    subscriber.rs  # tracing subscriber: console and log file layers, their filters, RUST_LOG
     file.rs        # RotatingFile: the log file, rotated by size, rotations gzipped
-    writer.rs      # the thread that writes the log file, LogGuard
+    writer.rs      # the thread that writes the log file, LogGuard, RawPrinter
     fields.rs      # self-rendering log fields: Invocation, HashRate, Percent, Keyspace
 
   model/
@@ -98,7 +98,7 @@ tests/
 - **provisioner.rs** — the `Provisioner` trait plus its on-disk implementation. Everything the `Client` does not cover: crackers, preprocessors, task files, hashlists and founds fetched and placed where the backend expects them. A trait so the loop can run against a fake. The associated `Cracker` type lets that fake hand the loop a fake cracker, and the associated `Restart` type a fake update to restart into.
 - **download.rs** — the `Downloader` trait and its reqwest implementation: a url streamed to a path. Separate from `transport.rs` because the JSON API is one POST endpoint while assets are GETs against arbitrary urls with no useful request timeout.
 - **http.rs** - turns the `server` config section into validated `HttpSettings` (client certificate, proxy, basic auth) at startup. Both the transport and the downloader build their reqwest client from it; only the transport adds a timeout. Basic auth goes on every API call, but on downloads only for the server's own origin.
-- **banner.rs**: the five-line startup banner `main` prints before bootstrap: ASCII art beside the version, target, server url (credentials stripped), agent name, update/cpu-only/piping flags and config path. It shows again after every self-update restart, so the new version is visible in the log.
+- **banner.rs**: the five-line startup banner `main` prints to the console and the log file before bootstrap: ASCII art beside the version, target, server url (credentials stripped), agent name, update/cpu-only/piping flags and config path. It shows again after every self-update restart, so the new version is visible in the log.
 - **archive.rs**: in-process 7z extraction via `sevenz-rust2`. `extract_into` drops an archive's contents at the destination root (wordlists); `extract_flattened` collapses a single wrapping folder (crackers, preprocessors).
 - **identity.rs** — what this build calls itself: agent type, version, and the `clientSignature` sent on login.
 - **backend/** — one submodule per supported binary, plus **backend/args.rs**: the fluent `Args` builder both backends use to assemble an argv (accepts borrowed or owned tokens, allocates once on `build`).
@@ -120,9 +120,9 @@ tests/
 - **sysinfo.rs** — OS and device inventory for registration / status reporting.
 - **process.rs** — spawning child processes, streaming stdio, reporting.
 - **log/**: logging to the console and, when the `log` config section names one, to a size-rotated file.
-  - **log/subscriber.rs**: installs the tracing subscriber: a console layer and an optional file layer without colour codes, each behind its own filter. The agent's own crate logs at the requested `Verbosity` with dependencies kept quieter, unless `RUST_LOG` takes over. `init` runs once the config is loaded, since that names the file, and returns the `LogGuard`.
+  - **log/subscriber.rs**: installs the tracing subscriber: a console layer and an optional file layer without colour codes, each behind its own filter. The agent's own crate logs at the requested `Verbosity` with dependencies kept quieter, unless `RUST_LOG` takes over. The file follows the console unless `log.level` gives it a level of its own, and a file that records trace output is announced with a warning, since trace can carry the agent token. `init` runs once the config is loaded, since that names the file, and returns the `RawPrinter` and the `LogGuard`.
   - **log/file.rs**: `RotatingFile`. Before a line would take the file past `max_size` it moves to `.1`, older rotations shift up one and at most `max_files` are kept. A failed rotation is reported on stderr and retried later, while lines keep going to the live file. `.1` is gzip-compressed on a thread of its own, through a temporary file so a crash never leaves a truncated `.gz`; a rotation whose compression failed stays plain and shifts along with the rest.
-  - **log/writer.rs**: the thread that owns the file. The agent's own threads only queue their lines, so a rotation holds them up only once the queue is full. Dropping the `LogGuard`, or calling `flush` before a self-update restart, waits until every queued line is written and a running compression has finished.
+  - **log/writer.rs**: the thread that owns the file. The agent's own threads only queue their lines, so a rotation holds them up only once the queue is full. Dropping the `LogGuard`, or calling `flush` before a self-update restart, waits until every queued line is written and a running compression has finished. The `RawPrinter` puts text on the console and, unfiltered and in one piece, in the file; `main` prints the banner with it.
   - **log/fields.rs**: the field types that render themselves the way the log should read them: `Invocation` (a copy-pasteable command line), `HashRate`, `Percent` and `Keyspace`.
 - **update.rs**: self-update. On a `checkClientVersion` "NEW" reply the agent downloads the server's `rust-agent.zip`, reads `manifest.json`, picks the binary whose `triples` include this build's `agent_target()` and swaps the running executable (`self-replace`). It does not restart in place: the installed update travels back as a `PendingRestart` through the provisioner and the loop to `main`, which drops the runtime first and then re-execs (on Windows, spawns the new binary and exits). The check runs at the end of bootstrap, so an idle agent updates on restart, and in the loop once per task pickup and after each successful chunk. A failed check or install is logged and never stops the agent. A failed restart restores the previous executable and ends the agent, because its loop has already wound down by then. Opt-out via `behavior.disable_update`. Integrity rests on the TLS download: the endpoint carries no hash, so there is no signature check yet.
 
