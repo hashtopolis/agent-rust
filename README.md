@@ -216,7 +216,9 @@ The file gets the same output as the console unless `log.level` (or
 `--log-file-level`) says otherwise, so the console can stay quiet while the file
 records more. `normal`, `debug` and `trace` mean what the console flags mean;
 anything else is a `RUST_LOG`-style filter, such as
-`htp_agent=trace,hyper=debug`. `RUST_LOG` then affects only the console. Trace
+`htp_agent=trace,hyper=debug`. A target in the filter needs its level spelled
+out (`hyper=trace`, not `hyper`), so a mistyped level such as `trce` is rejected
+at startup. `RUST_LOG` then affects only the console. Trace
 output includes full request and response bodies with the agent token, so the
 agent warns at startup when the file records it.
 

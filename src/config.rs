@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::level_filters::LevelFilter;
 use uuid::Uuid;
 
 pub const DEFAULT_SETTINGS_FILE: &str = "config.json";
@@ -259,8 +260,9 @@ impl Verbosity {
     }
 }
 
-/// `normal`, `debug` or `trace` as with the console flags, or any other text
-/// as a `RUST_LOG`-style filter such as `htp_agent=trace,hyper=debug`.
+/// `normal`, `debug` or `trace` as with the console flags, or a
+/// `RUST_LOG`-style filter such as `htp_agent=trace,hyper=debug`. A target in
+/// a filter needs its level spelled out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum LogLevel {
@@ -272,6 +274,10 @@ pub enum LogLevel {
 pub enum LogLevelError {
     #[error("empty log level: expected normal, debug, trace or a filter")]
     Empty,
+    #[error(
+        "unknown log level {0:?}: expected normal, debug, trace or a filter such as htp_agent=debug"
+    )]
+    UnknownLevel(String),
     #[error("invalid log filter {text:?}: {source}")]
     InvalidFilter {
         text: String,
@@ -294,6 +300,14 @@ impl FromStr for LogLevel {
             return Ok(Self::Verbosity(verbosity));
         }
 
+        if let Some(word) = text
+            .split(',')
+            .map(str::trim)
+            .find(|part| is_bare_target(part))
+        {
+            return Err(LogLevelError::UnknownLevel(word.to_string()));
+        }
+
         match tracing_subscriber::EnvFilter::builder().parse(text) {
             Ok(_) => Ok(Self::Filter(text.to_string())),
             Err(source) => Err(LogLevelError::InvalidFilter {
@@ -302,6 +316,12 @@ impl FromStr for LogLevel {
             }),
         }
     }
+}
+
+/// The filter syntax takes a word that is not a level for a target with every
+/// level enabled, so a mistyped `trce` would leave the log file empty.
+fn is_bare_target(directive: &str) -> bool {
+    !directive.is_empty() && !directive.contains('=') && directive.parse::<LevelFilter>().is_err()
 }
 
 impl TryFrom<String> for LogLevel {
@@ -1158,6 +1178,7 @@ mod tests {
             r#"{ "file": "agent.log", "max_size": 0 }"#,
             r#"{ "max_size": "10MB" }"#,
             r#"{ "file": "agent.log", "level": "htp_agent=loud" }"#,
+            r#"{ "file": "agent.log", "level": "trce" }"#,
         ] {
             let fixture = Fixture::new();
             fixture.write_settings(&format!(r#"{{ "log": {log} }}"#));
@@ -1269,8 +1290,30 @@ mod tests {
                 "htp_agent=trace,hyper=debug",
                 LogLevel::Filter("htp_agent=trace,hyper=debug".to_string()),
             ),
+            (
+                "warn,htp_agent=trace",
+                LogLevel::Filter("warn,htp_agent=trace".to_string()),
+            ),
         ] {
             assert_eq!(text.parse::<LogLevel>().unwrap(), level, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_word_that_is_no_level_is_rejected_instead_of_taken_for_a_target() {
+        for (text, word) in [
+            ("trce", "trce"),
+            ("debg", "debg"),
+            ("hyper", "hyper"),
+            ("inf,htp_agent=debug", "inf"),
+            ("htp_agent=debug,wrn", "wrn"),
+        ] {
+            let error = text.parse::<LogLevel>().unwrap_err();
+
+            assert!(
+                matches!(&error, LogLevelError::UnknownLevel(unknown) if unknown == word),
+                "{text}: {error:?}"
+            );
         }
     }
 
