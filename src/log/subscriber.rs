@@ -15,7 +15,7 @@ use crate::config::{LogFileConfig, LogLevel, Verbosity};
 
 use super::file::RotatingFile;
 use super::warn_on_stderr;
-use super::writer::{self, BackgroundWriter, LogGuard};
+use super::writer::{self, BackgroundWriter, LogGuard, RawPrinter};
 
 /// Install the tracing subscriber: the console always, plus `file` when one is
 /// configured.
@@ -28,18 +28,25 @@ use super::writer::{self, BackgroundWriter, LogGuard};
 ///
 /// If the log file cannot be opened, console logging is still installed so the
 /// caller can report the error.
-pub fn init(verbosity: Verbosity, file: Option<&LogFileConfig>) -> io::Result<LogGuard> {
+pub fn init(
+    verbosity: Verbosity,
+    file: Option<&LogFileConfig>,
+) -> io::Result<(RawPrinter, LogGuard)> {
     let rust_log = std::env::var("RUST_LOG").ok();
     let level = file.and_then(|file| file.level.as_ref());
 
-    let (file, guard) = match file.map(open_file) {
+    let (file, handles) = match file.map(open_file) {
         Some(Ok((writer, guard))) => {
             let filter = file_filter(verbosity, rust_log.as_deref(), level);
+            let printer = RawPrinter::with_file(writer.clone());
 
-            (Some((writer, filter)), Ok(guard))
+            (Some((writer, filter)), Ok((printer, guard)))
         }
         Some(Err(error)) => (None, Err(error)),
-        None => (None, Ok(LogGuard::console_only())),
+        None => (
+            None,
+            Ok((RawPrinter::console_only(), LogGuard::console_only())),
+        ),
     };
 
     let file_traces = file
@@ -61,7 +68,7 @@ pub fn init(verbosity: Verbosity, file: Option<&LogFileConfig>) -> io::Result<Lo
         tracing::warn!("{warning}");
     }
 
-    guard
+    handles
 }
 
 /// The file layer goes first: both share a span's rendered fields, and

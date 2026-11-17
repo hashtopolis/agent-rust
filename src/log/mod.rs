@@ -8,7 +8,7 @@ mod subscriber;
 mod writer;
 
 pub use subscriber::init;
-pub use writer::LogGuard;
+pub use writer::{LogGuard, RawPrinter};
 
 pub(crate) use fields::{HashRate, Invocation, Keyspace, Percent};
 

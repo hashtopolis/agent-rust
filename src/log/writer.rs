@@ -1,6 +1,7 @@
 //! The thread that writes the log file: the agent's own threads only queue
 //! their lines.
 
+use std::fmt;
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread;
@@ -32,6 +33,29 @@ impl Write for BackgroundWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// Prints text to the console and writes it to the log file as it is,
+/// whatever the log level.
+pub struct RawPrinter(Option<BackgroundWriter>);
+
+impl RawPrinter {
+    pub(super) fn console_only() -> Self {
+        Self(None)
+    }
+
+    pub(super) fn with_file(file: BackgroundWriter) -> Self {
+        Self(Some(file))
+    }
+
+    pub fn print(&self, text: impl fmt::Display) {
+        let text = text.to_string();
+        print!("{text}");
+
+        if let Some(file) = &self.0 {
+            let _ = file.clone().write_all(text.as_bytes());
+        }
     }
 }
 
@@ -158,6 +182,34 @@ mod tests {
         log.guard.flush();
 
         assert_eq!(fs::read_to_string(&log.path).unwrap(), "before\nafter\n");
+    }
+
+    #[test]
+    fn printed_text_lands_in_the_file_between_the_lines_around_it() {
+        let mut log = TestLog::new();
+        let printer = RawPrinter::with_file(log.writer.clone());
+
+        log.writer.write_all(b"before\n").unwrap();
+        printer.print("two\nlines\n");
+        log.writer.write_all(b"after\n").unwrap();
+        log.guard.flush();
+
+        assert_eq!(
+            fs::read_to_string(&log.path).unwrap(),
+            "before\ntwo\nlines\nafter\n"
+        );
+    }
+
+    #[test]
+    fn printed_text_is_never_split_by_a_rotation() {
+        let mut log = TestLog::rotating_at(10);
+        let printer = RawPrinter::with_file(log.writer.clone());
+
+        log.writer.write_all(b"12345\n").unwrap();
+        printer.print("two\nlines\n");
+        log.guard.flush();
+
+        assert_eq!(fs::read_to_string(&log.path).unwrap(), "two\nlines\n");
     }
 
     #[test]

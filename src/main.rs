@@ -33,8 +33,8 @@ fn main() -> ExitCode {
         Err(_) => cli.log_file_from_flags(),
     };
 
-    let log = match htp_agent::log::init(verbosity, log_file.as_ref()) {
-        Ok(log) => log,
+    let (printer, log) = match htp_agent::log::init(verbosity, log_file.as_ref()) {
+        Ok(handles) => handles,
         Err(error) => return failed(error),
     };
 
@@ -42,6 +42,13 @@ fn main() -> ExitCode {
         Ok(config) => config,
         Err(error) => return failed(error),
     };
+
+    let config_path = std::path::absolute(&cli.config).unwrap_or_else(|_| cli.config.clone());
+
+    printer.print(Banner {
+        settings: config.settings(),
+        config_path: &config_path,
+    });
 
     match run(&cli, config) {
         Ok(Exit::Shutdown) => ExitCode::SUCCESS,
@@ -114,16 +121,6 @@ async fn run(cli: &Cli, config: Config) -> Result<Exit<PendingRestart>> {
             .rsync_mount(rsync_mount)
             .build()
     };
-
-    let config_path = std::path::absolute(&cli.config).unwrap_or_else(|_| cli.config.clone());
-
-    print!(
-        "{}",
-        Banner {
-            settings: config.settings(),
-            config_path: &config_path,
-        }
-    );
 
     let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
 
