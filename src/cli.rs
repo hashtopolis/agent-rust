@@ -84,7 +84,8 @@ pub struct Cli {
     #[arg(long)]
     pub trace: bool,
 
-    /// Also write the log to this file, rotated by size.
+    /// Also write the log to this file, rotated by size; rotated files are
+    /// gzip-compressed.
     #[arg(long)]
     pub log_file: Option<PathBuf>,
 
