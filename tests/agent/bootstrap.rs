@@ -1,9 +1,9 @@
-use htp_agent::agent::{Agent, AgentError};
+use htp_agent::agent::{Agent, AgentError, Exit};
 use htp_agent::config::{Config, Overrides};
 use serde_json::json;
 
 use crate::support::env::Env;
-use crate::support::provisioner::{FakeProvisioner, Stage};
+use crate::support::provisioner::{FakeProvisioner, FakeRestart, Stage};
 use crate::support::transport::{ScriptedTransport, success};
 
 fn login_reply() -> serde_json::Value {
@@ -91,6 +91,28 @@ async fn checks_for_a_client_update() {
         .await
         .unwrap();
 
+    assert_eq!(probe.calls(), [Stage::CheckVersion]);
+}
+
+#[tokio::test]
+async fn an_update_installed_at_startup_restarts_before_entering_the_loop() {
+    let env = Env::new().with_token("stored-token");
+
+    let transport = ScriptedTransport::new([
+        success("testConnection"),
+        login_reply(),
+        success("updateInformation"),
+    ]);
+    let provisioner = FakeProvisioner::new().updating_on_check(1);
+    let probe = provisioner.clone();
+
+    let mut agent = Agent::bootstrap(transport, env.config(), provisioner)
+        .await
+        .unwrap();
+
+    let exit = agent.run().await.unwrap();
+
+    assert_eq!(exit, Exit::Restart(FakeRestart));
     assert_eq!(probe.calls(), [Stage::CheckVersion]);
 }
 
