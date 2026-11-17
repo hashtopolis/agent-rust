@@ -6,6 +6,8 @@ use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread;
 
+use tracing_subscriber::fmt::MakeWriter;
+
 use super::file::RotatingFile;
 use super::warn_on_stderr;
 
@@ -17,8 +19,9 @@ enum Message {
     Flush(SyncSender<()>),
 }
 
-/// The fmt layer writes an event with a single `write` call, so one call
-/// carries one whole line.
+/// One `write` call carries text that stays together in the file. The fmt
+/// layer writes a whole event with a single call, and the `RawPrinter` its
+/// whole text.
 #[derive(Clone)]
 pub(super) struct BackgroundWriter(SyncSender<Message>);
 
@@ -38,24 +41,41 @@ impl Write for BackgroundWriter {
 
 /// Prints text to the console and writes it to the log file as it is,
 /// whatever the log level.
-pub struct RawPrinter(Option<BackgroundWriter>);
+pub struct RawPrinter<C = StdoutConsole> {
+    console: C,
+    file: Option<BackgroundWriter>,
+}
+
+type StdoutConsole = fn() -> io::Stdout;
 
 impl RawPrinter {
     pub(super) fn console_only() -> Self {
-        Self(None)
+        Self {
+            console: io::stdout,
+            file: None,
+        }
     }
 
     pub(super) fn with_file(file: BackgroundWriter) -> Self {
-        Self(Some(file))
+        Self {
+            console: io::stdout,
+            file: Some(file),
+        }
     }
+}
 
+impl<C> RawPrinter<C>
+where
+    C: for<'a> MakeWriter<'a>,
+{
     pub fn print(&self, text: impl fmt::Display) {
         let text = text.to_string();
-        print!("{text}");
 
-        if let Some(file) = &self.0 {
+        if let Some(file) = &self.file {
             let _ = file.clone().write_all(text.as_bytes());
         }
+
+        let _ = self.console.make_writer().write_all(text.as_bytes());
     }
 }
 
@@ -156,6 +176,7 @@ mod tests {
     use super::*;
 
     use std::fs;
+    use std::sync::Mutex;
 
     #[test]
     fn flush_waits_until_every_queued_line_is_in_the_file() {
@@ -184,16 +205,36 @@ mod tests {
         assert_eq!(fs::read_to_string(&log.path).unwrap(), "before\nafter\n");
     }
 
+    fn printer_to(log: &TestLog) -> RawPrinter<Mutex<Vec<u8>>> {
+        RawPrinter {
+            console: Mutex::new(Vec::new()),
+            file: Some(log.writer.clone()),
+        }
+    }
+
+    struct BrokenConsole;
+
+    impl Write for BrokenConsole {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
-    fn printed_text_lands_in_the_file_between_the_lines_around_it() {
+    fn printed_text_goes_to_the_console_and_into_the_file_in_order() {
         let mut log = TestLog::new();
-        let printer = RawPrinter::with_file(log.writer.clone());
+        let printer = printer_to(&log);
 
         log.writer.write_all(b"before\n").unwrap();
         printer.print("two\nlines\n");
         log.writer.write_all(b"after\n").unwrap();
         log.guard.flush();
 
+        assert_eq!(*printer.console.lock().unwrap(), b"two\nlines\n");
         assert_eq!(
             fs::read_to_string(&log.path).unwrap(),
             "before\ntwo\nlines\nafter\n"
@@ -203,13 +244,39 @@ mod tests {
     #[test]
     fn printed_text_is_never_split_by_a_rotation() {
         let mut log = TestLog::rotating_at(10);
-        let printer = RawPrinter::with_file(log.writer.clone());
+        let printer = printer_to(&log);
 
         log.writer.write_all(b"12345\n").unwrap();
         printer.print("two\nlines\n");
         log.guard.flush();
 
         assert_eq!(fs::read_to_string(&log.path).unwrap(), "two\nlines\n");
+    }
+
+    #[test]
+    fn without_a_log_file_the_text_still_goes_to_the_console() {
+        let printer = RawPrinter {
+            console: Mutex::new(Vec::new()),
+            file: None,
+        };
+
+        printer.print("banner\n");
+
+        assert_eq!(*printer.console.lock().unwrap(), b"banner\n");
+    }
+
+    #[test]
+    fn a_console_that_fails_does_not_keep_the_text_out_of_the_file() {
+        let log = TestLog::new();
+        let printer = RawPrinter {
+            console: || BrokenConsole,
+            file: Some(log.writer.clone()),
+        };
+
+        printer.print("banner\n");
+        log.guard.flush();
+
+        assert_eq!(fs::read_to_string(&log.path).unwrap(), "banner\n");
     }
 
     #[test]

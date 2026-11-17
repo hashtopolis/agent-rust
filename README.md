@@ -221,7 +221,7 @@ out (`hyper=trace`, not `hyper`), so a mistyped level such as `trce` is rejected
 at startup. `RUST_LOG` then affects only the console. Trace
 output includes full request and response bodies with the agent token, so the
 agent warns at startup when the file records it. The startup banner goes into
-the file whatever the level, so every start is marked.
+the file as well, whatever the level.
 
 ### Server connection
 
