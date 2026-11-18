@@ -218,9 +218,8 @@ impl TryFrom<raw::GetTaskResponse> for model::GetTaskResponse {
             // failing the assignment.
             keyspace: raw
                 .keyspace
-                .ok_or(ProtocolError::MissingField("keyspace"))?
-                .try_into()
-                .ok(),
+                .map(|keyspace| u64::try_from(keyspace).ok())
+                .ok_or(ProtocolError::MissingField("keyspace"))?,
             enforce_pipe: raw.enforce_pipe,
             slow_hash: raw.slow_hash,
             preprocessor,
