@@ -246,8 +246,10 @@ pub(crate) struct GetTaskResponse {
     pub bench_type: Option<BenchmarkType>,
     #[serde(rename = "hashlistAlias", default)]
     pub hashlist_alias: Option<String>,
+    // Signed, because a task whose keyspace the server could not bound carries
+    // its sentinel instead of a size. See the conversion for what it becomes.
     #[serde(default)]
-    pub keyspace: Option<u64>,
+    pub keyspace: Option<i64>,
     #[serde(rename = "usePreprocessor", default)]
     pub use_preprocessor: bool,
     #[serde(rename = "preprocessor", default)]
