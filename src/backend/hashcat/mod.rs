@@ -93,6 +93,17 @@ struct ProducerStage {
     program: PathBuf,
     args: Vec<String>,
     window: Option<(u64, u64)>,
+    unit: StreamUnit,
+}
+
+/// What one line from a producer is worth in the chunk's keyspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamUnit {
+    /// One keyspace unit, so hashcat's restore point is an offset into the chunk.
+    Keyspace,
+    /// A finished candidate, with rules and mask positions already expanded, so
+    /// hashcat's restore point says nothing about the chunk.
+    Candidate,
 }
 
 impl Cracker for HashcatCracker {

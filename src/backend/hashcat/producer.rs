@@ -5,7 +5,9 @@ use crate::cracker::CrackerError;
 use crate::model::{Chunk, ResolvedPreprocessor, TaskAssignment};
 
 use super::argv::{self, path_arg};
-use super::{ChunkSource, HashcatCracker, HashcatInvocation, OUTFILE_FORMAT, ProducerStage};
+use super::{
+    ChunkSource, HashcatCracker, HashcatInvocation, OUTFILE_FORMAT, ProducerStage, StreamUnit,
+};
 
 impl HashcatCracker {
     /// The flag block shared by every hashcat consumer, whatever feeds it:
@@ -162,6 +164,7 @@ impl HashcatCracker {
             program: self.program().to_path_buf(),
             args,
             window: None,
+            unit: StreamUnit::Candidate,
         }
     }
 
@@ -200,6 +203,7 @@ impl HashcatCracker {
             program: preprocessor.binary_path.clone(),
             args,
             window,
+            unit: StreamUnit::Keyspace,
         }
     }
 }
@@ -212,7 +216,7 @@ mod tests {
     use crate::model::{BenchmarkType, Chunk, ResolvedPreprocessor, TaskAssignment};
 
     use super::super::argv::path_arg;
-    use super::super::{ChunkSource, HashcatCracker};
+    use super::super::{ChunkSource, HashcatCracker, StreamUnit};
 
     fn cracker() -> HashcatCracker {
         let dir = tempfile::tempdir().unwrap();
@@ -410,6 +414,40 @@ mod tests {
         // Removal flags are fixed for a piped consumer.
         assert!(invocation.args.iter().any(|arg| arg == "--remove"));
         assert!(invocation.args.iter().any(|arg| arg == "--potfile-disable"));
+    }
+
+    #[test]
+    fn a_preprocessor_stream_counts_keyspace_units() {
+        let cracker = cracker();
+
+        for pp in [
+            preprocessor(Some("--skip"), Some("--limit")),
+            preprocessor(None, None),
+        ] {
+            let stage = cracker
+                .build_invocation(&task(), &CHUNK, ChunkSource::Preprocessor(&pp))
+                .unwrap()
+                .producer
+                .unwrap();
+
+            assert_eq!(stage.unit, StreamUnit::Keyspace);
+        }
+    }
+
+    #[test]
+    fn a_self_pipe_stream_counts_candidates() {
+        let cracker = cracker();
+
+        let mut task = task();
+        task.attack_command = "#HL# -a 0 example.dict".into();
+
+        let stage = cracker
+            .build_invocation(&task, &CHUNK, ChunkSource::SelfPipe)
+            .unwrap()
+            .producer
+            .unwrap();
+
+        assert_eq!(stage.unit, StreamUnit::Candidate);
     }
 
     #[test]

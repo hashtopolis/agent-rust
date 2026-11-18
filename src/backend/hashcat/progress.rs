@@ -1,7 +1,8 @@
 //! Scales hashcat `PROGRESS` into 0..=10000 basis points for the server.
 //!
 //! Before 7.1.2-546, `PROGRESS` includes skipped candidates. From that build
-//! onward it is relative to the chunk's start. `CURKU` remains absolute.
+//! onward it is relative to the chunk's start. `CURKU` is a position in whatever
+//! hashcat was asked to read, which for a pipe is the stream the producer fed it.
 
 use crate::model::Chunk;
 
