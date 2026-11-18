@@ -24,6 +24,7 @@ state.json
 crackers/
 hashlists/
 files/
+preprocessors/
 
 # Release bundle output (scripts/bundle.sh)
 dist/
