@@ -212,9 +212,15 @@ impl TryFrom<raw::GetTaskResponse> for model::GetTaskResponse {
             hashlist_alias: raw
                 .hashlist_alias
                 .ok_or(ProtocolError::MissingField("hashlistAlias"))?,
+            // A preprocessor keyspace too large to measure is sent to the server as
+            // -1, which stores DPrince::PRINCE_KEYSPACE (-1605) and echoes that back
+            // here. Any value that is not a size reads as no keyspace rather than
+            // failing the assignment.
             keyspace: raw
                 .keyspace
-                .ok_or(ProtocolError::MissingField("keyspace"))?,
+                .ok_or(ProtocolError::MissingField("keyspace"))?
+                .try_into()
+                .ok(),
             enforce_pipe: raw.enforce_pipe,
             slow_hash: raw.slow_hash,
             preprocessor,

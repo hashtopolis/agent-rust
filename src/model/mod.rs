@@ -138,7 +138,9 @@ pub struct TaskAssignment {
     pub files: Vec<String>,
     pub bench_type: BenchmarkType,
     pub hashlist_alias: String,
-    pub keyspace: u64,
+    /// `None` when the server has no usable keyspace for the task, which is
+    /// what an unbounded preprocessor keyspace comes back as.
+    pub keyspace: Option<u64>,
     pub enforce_pipe: bool,
     pub slow_hash: bool,
     pub preprocessor: Option<Preprocessor>,

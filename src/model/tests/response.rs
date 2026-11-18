@@ -285,7 +285,7 @@ fn get_task_full_assignment_without_conditional_groups() {
     assert_eq!(task.cracker_id, 45);
     assert_eq!(task.attack_command, "#HL# -a 3 ?a?a?a?a --hash-type=0");
     assert_eq!(task.bench_type, BenchmarkType::Speed);
-    assert_eq!(task.keyspace, 0);
+    assert_eq!(task.keyspace, Some(0));
     assert_eq!(
         task.files,
         vec!["rockyou.txt".to_string(), "wordlist.txt".to_string()]
@@ -293,6 +293,39 @@ fn get_task_full_assignment_without_conditional_groups() {
     assert!(!task.slow_hash);
     assert!(task.preprocessor.is_none());
     assert!(task.brain.is_none());
+}
+
+#[test]
+fn get_task_with_an_unbounded_preprocessor_keyspace() {
+    // A preprocessor keyspace too large to measure is sent as -1 and stored as
+    // DPrince::PRINCE_KEYSPACE, which getTask echoes. It is not a size.
+    let res: GetTaskResponse = decode::<raw::GetTaskResponse, _>(json!({
+        "action": "getTask",
+        "response": "SUCCESS",
+        "taskId": 318,
+        "crackerId": 45,
+        "attackcmd": "#HL# --hash-type=0",
+        "cmdpars": " --hash-type=0 ",
+        "hashlistId": 13,
+        "bench": 30,
+        "statustimer": 5,
+        "files": ["verify-words.txt"],
+        "benchType": "speed",
+        "hashlistAlias": "#HL#",
+        "keyspace": -1605,
+        "usePreprocessor": true,
+        "preprocessor": 1,
+        "preprocessorCommand": "verify-words.txt",
+        "enforcePipe": false,
+        "slowHash": false,
+        "useBrain": false
+    }));
+
+    let GetTaskResponse::Task(task) = res else {
+        panic!("expected a task assignment, got {res:?}");
+    };
+    assert_eq!(task.task_id, 318);
+    assert_eq!(task.keyspace, None);
 }
 
 #[test]

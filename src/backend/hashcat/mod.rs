@@ -224,7 +224,7 @@ mod tests {
             files: Vec::new(),
             bench_type: BenchmarkType::Speed,
             hashlist_alias: "#HL#".into(),
-            keyspace: 0,
+            keyspace: Some(0),
             enforce_pipe: false,
             slow_hash: false,
             preprocessor: None,

@@ -12,7 +12,8 @@ use super::status::GenericStatus;
 ///
 /// The reference ignores `benchType` entirely: a generic benchmark has no speed
 /// branch. The keyspace bound comes from `task.keyspace`, which the server has
-/// already measured and stored; a zero bound simply yields no usable result.
+/// already measured and stored; a zero bound simply yields no usable result, and
+/// a task with no keyspace at all is bounded the same way.
 pub(super) async fn run(
     cracker: &GenericCracker,
     task: &TaskAssignment,
@@ -25,7 +26,7 @@ pub(super) async fn run(
         .arg("-s")
         .arg("0")
         .arg("-l")
-        .arg(task.keyspace.to_string())
+        .arg(task.keyspace.unwrap_or(0).to_string())
         .arg(format!("--timeout={}", task.benchmark))
         .build();
 
