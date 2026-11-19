@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
+use crate::digest::{ReprDigest, parse_repr_digest};
 use crate::http::BasicAuth;
 
 #[derive(Debug, Error)]
@@ -22,6 +23,12 @@ pub enum DownloadError {
     Status { url: String, status: u16 },
     #[error("cannot resolve download url {url}")]
     Url { url: String },
+    #[error("{url} failed its blake3 check: server announced {expected}, got {actual}")]
+    DigestMismatch {
+        url: String,
+        expected: String,
+        actual: String,
+    },
     #[error("failed to write {}: {source}", path.display())]
     Write {
         path: PathBuf,
@@ -118,6 +125,13 @@ impl Downloader for HttpDownloader {
             });
         }
 
+        // RFC 9530: when the server advertises a digest for the bytes it is
+        // about to send, hash the stream and check it. The header is absent
+        // until the server has computed the file's checksum, so a miss leaves
+        // the provisioner's size comparison as the only check, as before.
+        let expected = expected_digest(&url, response.headers());
+        let mut hasher = expected.map(|_| blake3::Hasher::new());
+
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -143,6 +157,10 @@ impl Downloader for HttpDownloader {
                 source,
             })?
         {
+            if let Some(hasher) = &mut hasher {
+                hasher.update(&chunk);
+            }
+
             file.write_all(&chunk)
                 .await
                 .map_err(|source| DownloadError::Write {
@@ -156,7 +174,66 @@ impl Downloader for HttpDownloader {
             source,
         })?;
 
+        // Closed before the reject path below can delete it: Windows refuses to
+        // remove a file that is still open.
+        drop(file);
+
+        if let (Some(expected), Some(hasher)) = (expected, hasher) {
+            let expected = blake3::Hash::from(expected);
+            let actual = hasher.finalize();
+
+            // blake3::Hash compares in constant time.
+            if expected != actual {
+                // The bad bytes must not stay on disk. `ensure_files` skips a
+                // download whose file is already there with the announced
+                // size, so a corruption that kept the length would otherwise be
+                // accepted on every pickup from here on.
+                if let Err(error) = tokio::fs::remove_file(dest).await {
+                    tracing::warn!(
+                        path = %dest.display(),
+                        %error,
+                        "could not remove the file that failed its digest check"
+                    );
+                }
+
+                return Err(DownloadError::DigestMismatch {
+                    url,
+                    expected: expected.to_hex().to_string(),
+                    actual: actual.to_hex().to_string(),
+                });
+            }
+
+            tracing::debug!(%url, "blake3 digest matches the one the server announced");
+        }
+
         Ok(())
+    }
+}
+
+/// The blake3 digest the response advertises, if any.
+///
+/// A header the agent cannot read is warned about and treated as absent rather
+/// than failing the download: anything able to tamper with the body could strip
+/// the header outright, so refusing to proceed buys no real integrity, while a
+/// server-side formatting slip would otherwise stall every fetch.
+fn expected_digest(url: &str, headers: &reqwest::header::HeaderMap) -> Option<[u8; 32]> {
+    let value = headers.get("repr-digest")?;
+
+    let Ok(value) = value.to_str() else {
+        tracing::warn!(%url, "Repr-Digest is not valid ascii; falling back to the size check");
+        return None;
+    };
+
+    match parse_repr_digest(value) {
+        ReprDigest::Blake3(digest) => Some(digest),
+        ReprDigest::Absent => {
+            tracing::debug!(%url, "Repr-Digest advertises no blake3 digest");
+            None
+        }
+        ReprDigest::Unreadable(why) => {
+            tracing::warn!(%url, why, "unreadable Repr-Digest; falling back to the size check");
+            None
+        }
     }
 }
 

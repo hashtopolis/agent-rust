@@ -26,6 +26,10 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "rustls-tls-native-roots",
 ] }
+# Verifying downloads against the server's RFC 9530 Repr-Digest header.
+blake3 = "1"
+# Already in the tree through reqwest; the digest arrives base64 encoded.
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive", "env"] }

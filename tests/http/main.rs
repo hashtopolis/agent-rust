@@ -6,6 +6,7 @@
 mod support;
 
 mod client_cert;
+mod digest;
 mod errors;
 mod proxy;
 mod trust_store;

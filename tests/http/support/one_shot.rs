@@ -14,15 +14,28 @@ pub struct OneShot {
 
 impl OneShot {
     pub async fn start(body: &'static str) -> Self {
+        Self::start_with_headers(body, &[("content-type", "application/json")]).await
+    }
+
+    /// Answers with `body` and the given extra response headers, on top of the
+    /// `content-length` and `connection` the server always sends. Lets a test
+    /// drive a real download against a header the agent reads off the response,
+    /// such as `Repr-Digest`.
+    pub async fn start_with_headers(body: &'static str, headers: &[(&str, &str)]) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+
+        let headers: String = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
 
         let handle = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let head = read_request(&mut socket).await;
 
             let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
             socket.write_all(response.as_bytes()).await.unwrap();

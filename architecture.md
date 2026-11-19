@@ -38,6 +38,7 @@ src/
   client.rs        # typed server API: getFileStatus, getTask, getChunk, ...
   config.rs        # typesafe config
   cracker.rs       # Cracker trait + factory (chooses backend)
+  digest.rs        # RFC 9530 Repr-Digest parsing (the server's blake3 checksum)
   download.rs      # Downloader trait + reqwest impl: url -> file on disk
   identity.rs      # agent type, version and client signature
   process.rs       # process helpers, stdio stream handling / reporting
@@ -96,6 +97,7 @@ tests/
 - **cli.rs** — clap argument parser; maps flags to config `Overrides`.
 - **cracker.rs** — defines the `Cracker` trait and a factory that selects the hashcat or generic backend, forwarding the auto-pipe policy (derived from config, threaded via the provisioner) to the hashcat backend.
 - **provisioner.rs** — the `Provisioner` trait plus its on-disk implementation. Everything the `Client` does not cover: crackers, preprocessors, task files, hashlists and founds fetched and placed where the backend expects them. A trait so the loop can run against a fake. The associated `Cracker` type lets that fake hand the loop a fake cracker, and the associated `Restart` type a fake update to restart into.
+- **digest.rs** — reads the blake3 member out of an RFC 9530 `Repr-Digest` field value (`blake3=:<base64 of 32 bytes>:`). The server sends it only once its checksum job has computed the file's hash, so "no digest to verify" is a normal outcome rather than an error, and a member the agent cannot read warns and degrades to the size check rather than failing: anything able to tamper with the body could strip the header instead.
 - **download.rs** — the `Downloader` trait and its reqwest implementation: a url streamed to a path. Separate from `transport.rs` because the JSON API is one POST endpoint while assets are GETs against arbitrary urls with no useful request timeout.
 - **http.rs** - turns the `server` config section into validated `HttpSettings` (client certificate, proxy, basic auth) at startup. Both the transport and the downloader build their reqwest client from it; only the transport adds a timeout. Basic auth goes on every API call, but on downloads only for the server's own origin.
 - **banner.rs**: the five-line startup banner `main` prints to the console and the log file before bootstrap: ASCII art beside the version, target, server url (credentials stripped), agent name, update/cpu-only/piping flags and config path. It shows again after every self-update restart, so the new version is visible in the log.
