@@ -1,20 +1,22 @@
+use std::fmt;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 
-use htp_agent::agent::{Agent, deregister};
+use htp_agent::agent::{Agent, Exit, deregister};
 use htp_agent::backend::hashcat::AutoPipePolicy;
+use htp_agent::banner::Banner;
 use htp_agent::cli::Cli;
 use htp_agent::client::Client;
-use htp_agent::config::{Config, Settings};
+use htp_agent::config::{Config, Settings, Verbosity};
 use htp_agent::download::HttpDownloader;
 use htp_agent::http::HttpSettings;
-use htp_agent::log::Verbosity;
+use htp_agent::log::RawPrinter;
 use htp_agent::provisioner::DiskProvisioner;
 use htp_agent::transport::HttpTransport;
+use htp_agent::update::PendingRestart;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let verbosity = match (cli.trace, cli.debug) {
@@ -22,21 +24,52 @@ async fn main() -> ExitCode {
         (false, true) => Verbosity::Debug,
         (false, false) => Verbosity::Normal,
     };
-    htp_agent::log::init(verbosity);
 
-    match run(cli).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            tracing::error!("agent exited: {error:#}");
+    // The config names the log file, so logging starts after loading it. If
+    // that fails, a `--log-file` still records why.
+    let config = Config::load(&cli.config, &cli.state, cli.overrides());
 
-            ExitCode::FAILURE
+    let log_file = match &config {
+        Ok(config) => config.settings().log.clone(),
+        Err(_) => cli.log_file_from_flags(),
+    };
+
+    let (printer, log) = match htp_agent::log::init(verbosity, log_file.as_ref()) {
+        Ok(handles) => handles,
+        Err(error) => return failed(error),
+    };
+
+    let config = match config {
+        Ok(config) => config,
+        Err(error) => return failed(error),
+    };
+
+    match run(&cli, config, &printer) {
+        Ok(Exit::Shutdown) => ExitCode::SUCCESS,
+        Ok(Exit::Restart(update)) => {
+            tracing::info!("restarting into the installed update");
+            log.flush();
+
+            match update.restart() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => failed(format_args!("restarting into the update failed: {error}")),
+            }
         }
+        Err(error) => failed(format_args!("{error:#}")),
     }
 }
 
-async fn run(cli: Cli) -> Result<()> {
-    let config = Config::load(&cli.config, &cli.state, cli.overrides())?;
+fn failed(reason: impl fmt::Display) -> ExitCode {
+    tracing::error!("agent exited: {reason}");
 
+    ExitCode::FAILURE
+}
+
+/// Run the agent on its own runtime. The runtime is dropped before this
+/// returns, which ends every task (and the crackers they started), so a restart
+/// begins from a settled process.
+#[tokio::main]
+async fn run(cli: &Cli, config: Config, printer: &RawPrinter) -> Result<Exit<PendingRestart>> {
     let url = config.require_url()?;
     let http = HttpSettings::from_server(&config.settings().server)?;
 
@@ -54,7 +87,7 @@ async fn run(cli: Cli) -> Result<()> {
         let client = Client::with_token(transport, token);
         deregister(&client, &config).await?;
 
-        return Ok(());
+        return Ok(Exit::Shutdown);
     }
 
     // No timeout here: downloads may stream for many minutes.
@@ -83,10 +116,16 @@ async fn run(cli: Cli) -> Result<()> {
             .build()
     };
 
-    let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
-    agent.run().await?;
+    let config_path = std::path::absolute(&cli.config).unwrap_or_else(|_| cli.config.clone());
 
-    Ok(())
+    printer.print(Banner {
+        settings: config.settings(),
+        config_path: &config_path,
+    });
+
+    let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
+
+    Ok(agent.run().await?)
 }
 
 struct ProvisionerSettings {

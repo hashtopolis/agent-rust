@@ -3,7 +3,7 @@
 mod progress;
 mod run;
 
-pub use run::{LoopState, Step};
+pub use run::{Exit, LoopState, Step};
 
 use thiserror::Error;
 use tokio::time::sleep;
@@ -77,6 +77,8 @@ pub struct Agent<T: Transport, P: Provisioner<T>> {
     provisioner: P,
     #[allow(dead_code)]
     session: Session,
+    /// Set by a version check that installed an update; handed back by `run`.
+    pending_restart: Option<P::Restart>,
 }
 
 impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
@@ -86,6 +88,7 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             config,
             provisioner,
             session,
+            pending_restart: None,
         }
     }
 
@@ -124,7 +127,10 @@ impl<T: Transport, P: Provisioner<T>> Agent<T, P> {
             server_version: login_result.server_version,
         };
 
-        Ok(Self::new(client, config, provisioner, session))
+        let mut agent = Self::new(client, config, provisioner, session);
+        agent.maybe_check_version().await;
+
+        Ok(agent)
     }
 
     pub async fn deregister(self) -> Result<(), AgentError> {

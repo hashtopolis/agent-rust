@@ -94,14 +94,19 @@ pub enum Stage {
     Found,
 }
 
+/// Stands in for an installed update the agent should restart into.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FakeRestart;
+
 /// Never touches the client, so a loop test only scripts the loop's own
-/// requests. Records every provisioning call and, optionally, fails one stage.
-/// Clones share the call log, so a test keeps a probe after the provisioner is
-/// moved into the agent.
+/// requests. Records every provisioning call and, optionally, fails one stage
+/// or installs an update on a given version check. Clones share the call log,
+/// so a test keeps a probe after the provisioner is moved into the agent.
 #[derive(Clone)]
 pub struct FakeProvisioner {
     cracker: FakeCracker,
     fail_at: Option<Stage>,
+    update_on_check: Option<usize>,
     calls: Arc<Mutex<Vec<Stage>>>,
 }
 
@@ -116,6 +121,7 @@ impl FakeProvisioner {
         Self {
             cracker: FakeCracker::default(),
             fail_at: None,
+            update_on_check: None,
             calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -127,6 +133,12 @@ impl FakeProvisioner {
 
     pub fn failing_at(mut self, stage: Stage) -> Self {
         self.fail_at = Some(stage);
+        self
+    }
+
+    /// Report an installed update on the `nth` version check (1-based).
+    pub fn updating_on_check(mut self, nth: usize) -> Self {
+        self.update_on_check = Some(nth);
         self
     }
 
@@ -157,6 +169,7 @@ fn not_ready() -> ProvisionError {
 
 impl<T: Transport> Provisioner<T> for FakeProvisioner {
     type Cracker = FakeCracker;
+    type Restart = FakeRestart;
 
     async fn deletion_check(&self, _client: &Client<T>) -> Result<(), ProvisionError> {
         self.enter(Stage::DeletionCheck)
@@ -214,7 +227,18 @@ impl<T: Transport> Provisioner<T> for FakeProvisioner {
         self.enter(Stage::Found)
     }
 
-    async fn check_client_version(&self, _client: &Client<T>) -> Result<(), ProvisionError> {
-        self.enter(Stage::CheckVersion)
+    async fn check_client_version(
+        &self,
+        _client: &Client<T>,
+    ) -> Result<Option<FakeRestart>, ProvisionError> {
+        self.enter(Stage::CheckVersion)?;
+
+        let checks = self
+            .calls()
+            .iter()
+            .filter(|stage| **stage == Stage::CheckVersion)
+            .count();
+
+        Ok((self.update_on_check == Some(checks)).then_some(FakeRestart))
     }
 }

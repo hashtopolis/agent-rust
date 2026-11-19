@@ -1,8 +1,12 @@
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::config::{DEFAULT_SETTINGS_FILE, DEFAULT_STATE_FILE, Overrides};
+use crate::config::{
+    ByteSize, DEFAULT_SETTINGS_FILE, DEFAULT_STATE_FILE, LogFileConfig, LogLevel, Overrides,
+    Settings,
+};
 
 // No `Debug`: `--proxy` may carry credentials.
 #[derive(Parser)]
@@ -80,11 +84,38 @@ pub struct Cli {
     /// Enable trace logging, including full request/response bodies.
     #[arg(long)]
     pub trace: bool,
+
+    /// Also write the log to this file, rotated by size; rotated files are
+    /// gzip-compressed.
+    #[arg(long)]
+    pub log_file: Option<PathBuf>,
+
+    /// Rotate the log file before it grows past this size, e.g. 500KB, 10MB
+    /// (the default) or 1GB.
+    #[arg(long)]
+    pub log_max_size: Option<ByteSize>,
+
+    /// How many rotated log files to keep (default 5).
+    #[arg(long)]
+    pub log_max_files: Option<NonZeroUsize>,
+
+    /// How much goes into the log file: normal, debug, trace, or a RUST_LOG
+    /// style filter such as htp_agent=trace,hyper=debug. Defaults to what the
+    /// console gets.
+    #[arg(long)]
+    pub log_file_level: Option<LogLevel>,
 }
 
 impl Cli {
     pub fn parse() -> Self {
         <Self as Parser>::parse()
+    }
+
+    pub fn log_file_from_flags(&self) -> Option<LogFileConfig> {
+        let mut settings = Settings::default();
+        self.overrides().apply(&mut settings);
+
+        settings.log
     }
 
     pub fn overrides(&self) -> Overrides {
@@ -106,6 +137,45 @@ impl Cli {
             zaps_path: self.zaps_path.clone(),
             cache_path: self.cache_path.clone(),
             hashcat_path: self.hashcat_path.clone(),
+            log_file: self.log_file.clone(),
+            log_max_size: self.log_max_size,
+            log_max_files: self.log_max_files,
+            log_file_level: self.log_file_level.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::config::Verbosity;
+
+    #[test]
+    fn the_log_file_flags_alone_describe_a_log_file() {
+        let cli = Cli::try_parse_from([
+            "htp-agent",
+            "--log-file",
+            "agent.log",
+            "--log-max-files",
+            "2",
+            "--log-file-level",
+            "trace",
+        ])
+        .unwrap();
+
+        let log = cli.log_file_from_flags().unwrap();
+
+        assert_eq!(log.file, PathBuf::from("agent.log"));
+        assert_eq!(log.max_files.get(), 2);
+        assert_eq!(log.max_size.bytes(), 10_485_760);
+        assert_eq!(log.level, Some(LogLevel::Verbosity(Verbosity::Trace)));
+    }
+
+    #[test]
+    fn without_a_log_file_flag_there_is_no_log_file() {
+        let cli = Cli::try_parse_from(["htp-agent", "--log-max-size", "1MB"]).unwrap();
+
+        assert_eq!(cli.log_file_from_flags(), None);
     }
 }

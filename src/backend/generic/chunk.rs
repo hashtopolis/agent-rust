@@ -177,9 +177,9 @@ impl ChunkRun {
             relative_progress: status.progress(),
             speed: status.speed(),
             state: if status.progress() == GenericStatus::COMPLETE {
-                4
+                ProgressReport::STATE_EXHAUSTED
             } else {
-                2
+                ProgressReport::STATE_RUNNING
             },
         };
 
@@ -288,7 +288,7 @@ impl ChunkRun {
         ProgressReport {
             chunk_id: self.chunk.id,
             keyspace_progress: self.chunk.skip,
-            state: 2,
+            state: ProgressReport::STATE_RUNNING,
             ..Default::default()
         }
     }
@@ -426,17 +426,17 @@ mod tests {
         let reports = sink.reports();
         assert_eq!(reports.len(), 2, "one report per status line");
 
-        // First status: mid-chunk, state 2, carrying the first crack unsplit. The
+        // First status: mid-chunk, running, carrying the first crack unsplit. The
         // cursor tracks progress: skip + length * 5000/10000 = 10 + 10.
         assert_eq!(reports[0].relative_progress, 5000);
         assert_eq!(reports[0].keyspace_progress, CHUNK.skip + CHUNK.length / 2);
-        assert_eq!(reports[0].state, 2);
+        assert_eq!(reports[0].state, ProgressReport::STATE_RUNNING);
         assert_eq!(reports[0].cracks, vec![Crack::Raw("h1:p1".to_owned())]);
 
-        // Final status: complete, state 4, cursor at skip + length, second crack.
+        // Final status: complete, exhausted, cursor at skip + length, second crack.
         assert_eq!(reports[1].relative_progress, 10000);
         assert_eq!(reports[1].keyspace_progress, CHUNK.skip + CHUNK.length);
-        assert_eq!(reports[1].state, 4);
+        assert_eq!(reports[1].state, ProgressReport::STATE_EXHAUSTED);
         assert_eq!(reports[1].cracks, vec![Crack::Raw("h2:p2".to_owned())]);
     }
 

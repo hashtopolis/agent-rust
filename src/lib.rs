@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod archive;
 pub mod backend;
+pub mod banner;
 pub mod cli;
 pub mod client;
 pub mod config;

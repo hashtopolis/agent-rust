@@ -97,7 +97,7 @@ async fn get_task_returns_task_assignment() {
             files: vec!["rockyou.txt".to_string(), "wordlist.txt".to_string()],
             bench_type: BenchmarkType::Speed,
             hashlist_alias: "#HL#".to_string(),
-            keyspace: 0,
+            keyspace: Some(0),
             enforce_pipe: false,
             slow_hash: false,
             preprocessor: Some(Preprocessor {

@@ -33,6 +33,7 @@ src/
     progress.rs    # ClientSink: adapts Client into the backends' ProgressSink
 
   archive.rs       # in-process 7z extraction (sevenz-rust2)
+  banner.rs        # startup banner: version and key settings
   cli.rs           # clap argument parser -> config Overrides
   client.rs        # typed server API: getFileStatus, getTask, getChunk, ...
   config.rs        # typesafe config
@@ -45,6 +46,13 @@ src/
   sysinfo.rs       # OS + device inventory
   transport.rs     # low-level HTTP: Transport trait, reqwest impl
   update.rs        # self-update machinery
+
+  log/
+    mod.rs         # logging module list and re-exports
+    subscriber.rs  # tracing subscriber: console and log file layers, their filters, RUST_LOG
+    file.rs        # RotatingFile: the log file, rotated by size, rotations gzipped
+    writer.rs      # the thread that writes the log file, LogGuard, RawPrinter
+    fields.rs      # self-rendering log fields: Invocation, HashRate, Percent, Keyspace
 
   model/
     mod.rs         # domain types: task assignment, Chunk, response types, ...
@@ -83,15 +91,16 @@ tests/
 ## Module responsibilities
 
 - **agent/** — orchestrator, split so the startup path and the steady-state loop stay separable:
-  - **agent/mod.rs** — `AgentError`, the retry macro, `Session`, the `Agent` struct and its startup path (`bootstrap`, token resolution, registration, directory creation), plus `deregister`.
-  - **agent/run.rs** — the run loop, in a second `impl Agent` block. Asks `client` for work, dispatches tasks/chunks to a backend via the `Cracker` trait, reports progress, holds the state machine. `tick` performs one iteration and returns a `Step` (continue / sleep / shutdown) instead of sleeping itself, so `run` owns all timing and the shutdown signal and the loop stays testable.
+  - **agent/mod.rs** — `AgentError`, the retry macro, `Session`, the `Agent` struct and its startup path (`bootstrap`, token resolution, registration, directory creation, the startup version check), plus `deregister`.
+  - **agent/run.rs** — the run loop, in a second `impl Agent` block. Asks `client` for work, dispatches tasks/chunks to a backend via the `Cracker` trait, reports progress, holds the state machine. `tick` performs one iteration and returns a `Step` (continue / sleep / shutdown / restart) instead of sleeping itself, so `run` owns all timing and the shutdown signal and the loop stays testable. `run` returns an `Exit`: a plain shutdown, or the installed update that `main` restarts into.
   - **agent/progress.rs** — `ClientSink`, which adapts the `Client` into the `ProgressSink` the backends report through.
 - **cli.rs** — clap argument parser; maps flags to config `Overrides`.
 - **cracker.rs** — defines the `Cracker` trait and a factory that selects the hashcat or generic backend, forwarding the auto-pipe policy (derived from config, threaded via the provisioner) to the hashcat backend.
-- **provisioner.rs** — the `Provisioner` trait plus its on-disk implementation. Everything the `Client` does not cover: crackers, preprocessors, task files, hashlists and founds fetched and placed where the backend expects them. A trait so the loop can run against a fake. The associated `Cracker` type lets that fake hand the loop a fake cracker.
-- **download.rs** — the `Downloader` trait and its reqwest implementation: a url streamed to a path. Separate from `transport.rs` because the JSON API is one POST endpoint while assets are GETs against arbitrary urls with no useful request timeout. When a response advertises a blake3 digest in its `Repr-Digest` header the stream is hashed as it is written and a mismatch deletes the file and fails the download; with no such header nothing is hashed and the provisioner's size comparison stays the only check, which is still the case for a task file satisfied over rsync.
+- **provisioner.rs** — the `Provisioner` trait plus its on-disk implementation. Everything the `Client` does not cover: crackers, preprocessors, task files, hashlists and founds fetched and placed where the backend expects them. A trait so the loop can run against a fake. The associated `Cracker` type lets that fake hand the loop a fake cracker, and the associated `Restart` type a fake update to restart into.
 - **digest.rs** — reads the blake3 member out of an RFC 9530 `Repr-Digest` field value (`blake3=:<base64 of 32 bytes>:`). The server sends it only once its checksum job has computed the file's hash, so "no digest to verify" is a normal outcome rather than an error, and a member the agent cannot read warns and degrades to the size check rather than failing: anything able to tamper with the body could strip the header instead.
+- **download.rs** — the `Downloader` trait and its reqwest implementation: a url streamed to a path. Separate from `transport.rs` because the JSON API is one POST endpoint while assets are GETs against arbitrary urls with no useful request timeout.
 - **http.rs** - turns the `server` config section into validated `HttpSettings` (client certificate, proxy, basic auth) at startup. Both the transport and the downloader build their reqwest client from it; only the transport adds a timeout. Basic auth goes on every API call, but on downloads only for the server's own origin.
+- **banner.rs**: the five-line startup banner `main` prints to the console and the log file before bootstrap: ASCII art beside the version, target, server url (credentials stripped), agent name, update/cpu-only/piping flags and config path. It shows again after every self-update restart, so the new version is visible in the log.
 - **archive.rs**: in-process 7z extraction via `sevenz-rust2`. `extract_into` drops an archive's contents at the destination root (wordlists); `extract_flattened` collapses a single wrapping folder (crackers, preprocessors).
 - **identity.rs** — what this build calls itself: agent type, version, and the `clientSignature` sent on login.
 - **backend/** — one submodule per supported binary, plus **backend/args.rs**: the fluent `Args` builder both backends use to assemble an argv (accepts borrowed or owned tokens, allocates once on `build`).
@@ -112,7 +121,12 @@ tests/
 - **config.rs** — typesafe config, no string-keyed lookups. Two files with distinct owners: `config.json` holds the user's settings and is **only ever read** by the agent (so it is safe to re-read every loop iteration, and hand edits survive); `state.json` is agent-owned and holds the token and uuid, rewritten atomically when either changes. CLI flags live in `Overrides`, applied over the settings on load and re-applied after every reload, and are never persisted back.
 - **sysinfo.rs** — OS and device inventory for registration / status reporting.
 - **process.rs** — spawning child processes, streaming stdio, reporting.
-- **update.rs**: self-update. On a `checkClientVersion` "NEW" reply the agent downloads the server's `rust-agent.zip`, reads `manifest.json`, picks the binary whose `triples` include this build's `agent_target()`, swaps the running executable (`self-replace`) and re-execs. Opt-out via `behavior.disable_update`. Integrity rests on the TLS download: the endpoint sends no `Repr-Digest` and the manifest carries no hash, so there is no signature check yet. A server that did checksum `rust-agent.zip` would be honoured for free, since the check lives in the downloader.
+- **log/**: logging to the console and, when the `log` config section names one, to a size-rotated file.
+  - **log/subscriber.rs**: installs the tracing subscriber: a console layer and an optional file layer without colour codes, each behind its own filter. The agent's own crate logs at the requested `Verbosity` with dependencies kept quieter, unless `RUST_LOG` takes over. The file follows the console unless `log.level` gives it a level of its own, and a file that records trace output is announced with a warning, since trace can carry the agent token. `init` runs once the config is loaded, since that names the file, and returns the `RawPrinter` and the `LogGuard`.
+  - **log/file.rs**: `RotatingFile`. Before a line would take the file past `max_size` it moves to `.1`, older rotations shift up one and at most `max_files` are kept. A failed rotation is reported on stderr and retried later, while lines keep going to the live file. `.1` is gzip-compressed on a thread of its own, through a temporary file so a crash never leaves a truncated `.gz`; a rotation whose compression failed stays plain and shifts along with the rest.
+  - **log/writer.rs**: the thread that owns the file. The agent's own threads only queue their lines, so a rotation holds them up only once the queue is full. Dropping the `LogGuard`, or calling `flush` before a self-update restart, waits until every queued line is written and a running compression has finished. The `RawPrinter` puts text on the console and, unfiltered and in one piece, in the file; `main` prints the banner with it.
+  - **log/fields.rs**: the field types that render themselves the way the log should read them: `Invocation` (a copy-pasteable command line), `HashRate`, `Percent` and `Keyspace`.
+- **update.rs**: self-update. On a `checkClientVersion` "NEW" reply the agent downloads the server's `rust-agent.zip`, reads `manifest.json`, picks the binary whose `triples` include this build's `agent_target()` and swaps the running executable (`self-replace`). It does not restart in place: the installed update travels back as a `PendingRestart` through the provisioner and the loop to `main`, which drops the runtime first and then re-execs (on Windows, spawns the new binary and exits). The check runs at the end of bootstrap, so an idle agent updates on restart, and in the loop once per task pickup and after each successful chunk. A failed check or install is logged and never stops the agent. A failed restart restores the previous executable and ends the agent, because its loop has already wound down by then. Opt-out via `behavior.disable_update`. Integrity rests on the TLS download: the endpoint carries no hash, so there is no signature check yet.
 
 ## Open questions / notes
 

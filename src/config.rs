@@ -5,11 +5,14 @@
 use std::fmt;
 use std::fs;
 use std::io;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::level_filters::LevelFilter;
 use uuid::Uuid;
 
 pub const DEFAULT_SETTINGS_FILE: &str = "config.json";
@@ -48,6 +51,11 @@ pub enum ConfigError {
         path.display()
     )]
     MissingVoucher { path: PathBuf },
+    #[error(
+        "--log-max-size, --log-max-files and --log-file-level need a log file: set log.file in {} or pass --log-file",
+        path.display()
+    )]
+    LogOptionsWithoutFile { path: PathBuf },
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +200,226 @@ pub struct CrackerConfig {
     pub hashcat_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogFileConfig {
+    pub file: PathBuf,
+    #[serde(default = "LogFileConfig::default_max_size")]
+    pub max_size: ByteSize,
+    #[serde(default = "LogFileConfig::default_max_files")]
+    pub max_files: NonZeroUsize,
+    /// Without one the file gets what the console gets.
+    #[serde(default)]
+    pub level: Option<LogLevel>,
+}
+
+impl LogFileConfig {
+    pub fn new(file: PathBuf) -> Self {
+        Self {
+            file,
+            max_size: Self::default_max_size(),
+            max_files: Self::default_max_files(),
+            level: None,
+        }
+    }
+
+    fn default_max_size() -> ByteSize {
+        ByteSize(NonZeroU64::new(10 << 20).expect("non-zero"))
+    }
+
+    fn default_max_files() -> NonZeroUsize {
+        NonZeroUsize::new(5).expect("non-zero")
+    }
+}
+
+/// How verbose the agent's own logging should be when `RUST_LOG` is unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verbosity {
+    Normal,
+    Debug,
+    Trace,
+}
+
+impl Verbosity {
+    const ALL: [Self; 3] = [Self::Normal, Self::Debug, Self::Trace];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+
+    /// Case-insensitive like the filter syntax, where `TRACE` would otherwise
+    /// turn every dependency up to trace as well.
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|verbosity| verbosity.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// `normal`, `debug` or `trace` as with the console flags, or a
+/// `RUST_LOG`-style filter such as `htp_agent=trace,hyper=debug`. A target in
+/// a filter needs its level spelled out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum LogLevel {
+    Verbosity(Verbosity),
+    Filter(String),
+}
+
+#[derive(Debug, Error)]
+pub enum LogLevelError {
+    #[error("empty log level: expected normal, debug, trace or a filter")]
+    Empty,
+    #[error(
+        "unknown log level {0:?}: expected normal, debug, trace or a filter such as htp_agent=debug"
+    )]
+    UnknownLevel(String),
+    #[error("invalid log filter {text:?}: {source}")]
+    InvalidFilter {
+        text: String,
+        #[source]
+        source: tracing_subscriber::filter::ParseError,
+    },
+}
+
+impl FromStr for LogLevel {
+    type Err = LogLevelError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let text = text.trim();
+
+        if text.is_empty() {
+            return Err(LogLevelError::Empty);
+        }
+
+        if let Some(verbosity) = Verbosity::from_name(text) {
+            return Ok(Self::Verbosity(verbosity));
+        }
+
+        if let Some(word) = text
+            .split(',')
+            .map(str::trim)
+            .find(|part| is_bare_target(part))
+        {
+            return Err(LogLevelError::UnknownLevel(word.to_string()));
+        }
+
+        match tracing_subscriber::EnvFilter::builder().parse(text) {
+            Ok(_) => Ok(Self::Filter(text.to_string())),
+            Err(source) => Err(LogLevelError::InvalidFilter {
+                text: text.to_string(),
+                source,
+            }),
+        }
+    }
+}
+
+/// The filter syntax takes a word that is not a level for a target with every
+/// level enabled, so a mistyped `trce` would leave the log file empty.
+fn is_bare_target(directive: &str) -> bool {
+    !directive.is_empty() && !directive.contains('=') && directive.parse::<LevelFilter>().is_err()
+}
+
+impl TryFrom<String> for LogLevel {
+    type Error = LogLevelError;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        text.parse()
+    }
+}
+
+impl From<LogLevel> for String {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Verbosity(verbosity) => verbosity.name().to_string(),
+            LogLevel::Filter(filter) => filter,
+        }
+    }
+}
+
+/// A size in bytes, written as a plain byte count or with a binary unit:
+/// `500KB`, `10MB`, `1GB`. Never zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ByteSizeRepr")]
+pub struct ByteSize(NonZeroU64);
+
+impl ByteSize {
+    const UNITS: [(&str, u64); 3] = [("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)];
+
+    fn new(bytes: u64) -> Result<Self, ByteSizeError> {
+        NonZeroU64::new(bytes).map(Self).ok_or(ByteSizeError::Zero)
+    }
+
+    pub fn bytes(self) -> u64 {
+        self.0.get()
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ByteSizeError {
+    #[error("invalid size {0:?}: expected e.g. 10MB, 500KB, 1GB or a byte count")]
+    Invalid(String),
+    #[error("size must be greater than zero")]
+    Zero,
+}
+
+impl FromStr for ByteSize {
+    type Err = ByteSizeError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid = || ByteSizeError::Invalid(text.to_string());
+
+        let trimmed = text.trim();
+        let digits = trimmed
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(trimmed.len());
+        let (number, unit) = trimmed.split_at(digits);
+        let unit = unit.trim().to_ascii_uppercase();
+
+        let multiplier = match unit.as_str() {
+            "" | "B" => 1,
+            unit => Self::UNITS
+                .iter()
+                .find(|(name, _)| *name == unit)
+                .map(|(_, multiplier)| *multiplier)
+                .ok_or_else(invalid)?,
+        };
+
+        let bytes = number
+            .parse::<u64>()
+            .ok()
+            .and_then(|number| number.checked_mul(multiplier))
+            .ok_or_else(invalid)?;
+
+        Self::new(bytes)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    untagged,
+    expecting = "expected a size such as \"10MB\" or a byte count"
+)]
+enum ByteSizeRepr {
+    Bytes(u64),
+    Text(String),
+}
+
+impl TryFrom<ByteSizeRepr> for ByteSize {
+    type Error = ByteSizeError;
+
+    fn try_from(repr: ByteSizeRepr) -> Result<Self, Self::Error> {
+        match repr {
+            ByteSizeRepr::Bytes(bytes) => Self::new(bytes),
+            ByteSizeRepr::Text(text) => text.parse(),
+        }
+    }
+}
+
 /// User-owned; never written by the agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -201,6 +429,7 @@ pub struct Settings {
     pub paths: Paths,
     pub behavior: Behavior,
     pub cracker: CrackerConfig,
+    pub log: Option<LogFileConfig>,
 }
 
 /// Agent-owned; what the agent must remember across restarts.
@@ -233,10 +462,14 @@ pub struct Overrides {
     pub zaps_path: Option<PathBuf>,
     pub cache_path: Option<PathBuf>,
     pub hashcat_path: Option<PathBuf>,
+    pub log_file: Option<PathBuf>,
+    pub log_max_size: Option<ByteSize>,
+    pub log_max_files: Option<NonZeroUsize>,
+    pub log_file_level: Option<LogLevel>,
 }
 
 impl Overrides {
-    fn apply(self, settings: &mut Settings) {
+    pub(crate) fn apply(self, settings: &mut Settings) {
         if self.hashcat_path.is_some() {
             settings.cracker.hashcat_path = self.hashcat_path;
         }
@@ -294,6 +527,31 @@ impl Overrides {
         if self.cache_path.is_some() {
             settings.paths.cache = self.cache_path;
         }
+
+        if let Some(file) = self.log_file {
+            match &mut settings.log {
+                Some(log) => log.file = file,
+                None => settings.log = Some(LogFileConfig::new(file)),
+            }
+        }
+
+        if let Some(log) = &mut settings.log {
+            if let Some(max_size) = self.log_max_size {
+                log.max_size = max_size;
+            }
+
+            if let Some(max_files) = self.log_max_files {
+                log.max_files = max_files;
+            }
+
+            if let Some(level) = self.log_file_level {
+                log.level = Some(level);
+            }
+        }
+    }
+
+    fn needs_log_file(&self) -> bool {
+        self.log_max_size.is_some() || self.log_max_files.is_some() || self.log_file_level.is_some()
     }
 }
 
@@ -318,7 +576,15 @@ impl Config {
         let state_path = state_path.into();
 
         let mut settings = read_settings(&settings_path)?;
+
+        let needs_log_file = overrides.needs_log_file();
         overrides.apply(&mut settings);
+
+        if needs_log_file && settings.log.is_none() {
+            return Err(ConfigError::LogOptionsWithoutFile {
+                path: settings_path,
+            });
+        }
 
         let state = read_state(&state_path)?;
 
@@ -533,6 +799,12 @@ mod tests {
             cracker: CrackerConfig {
                 hashcat_path: Some(PathBuf::from("/opt/homebrew/bin/hashcat")),
             },
+            log: Some(LogFileConfig {
+                file: PathBuf::from("/var/log/htp-agent.log"),
+                max_size: "500KB".parse().unwrap(),
+                max_files: NonZeroUsize::new(3).unwrap(),
+                level: Some("htp_agent=trace,hyper=debug".parse().unwrap()),
+            }),
         };
 
         let encoded = serde_json::to_string_pretty(&settings).unwrap();
@@ -834,5 +1106,245 @@ mod tests {
         assert!(debug.contains("agent"), "{debug}");
         assert!(!debug.contains("secret"), "{debug}");
         assert!(!debug.contains("hunter2"), "{debug}");
+    }
+
+    #[test]
+    fn byte_sizes_take_a_binary_unit_or_a_plain_byte_count() {
+        for (text, bytes) in [
+            ("4096", 4096),
+            ("500KB", 512_000),
+            ("10MB", 10_485_760),
+            ("1GB", 1_073_741_824),
+            ("10 mb", 10_485_760),
+            ("2b", 2),
+        ] {
+            assert_eq!(text.parse::<ByteSize>().unwrap().bytes(), bytes, "{text}");
+        }
+    }
+
+    #[test]
+    fn byte_sizes_reject_unknown_units_and_garbage() {
+        for text in ["", "MB", "10XB", "-1", "1.5MB", "99999999999GB"] {
+            assert_eq!(
+                text.parse::<ByteSize>(),
+                Err(ByteSizeError::Invalid(text.to_string())),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn byte_sizes_reject_zero() {
+        for text in ["0", "0MB"] {
+            assert_eq!(text.parse::<ByteSize>(), Err(ByteSizeError::Zero), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_log_file_without_limits_rotates_at_10mb_and_keeps_5_files() {
+        let fixture = Fixture::new();
+        fixture.write_settings(r#"{ "log": { "file": "agent.log" } }"#);
+
+        let config = fixture.load(Overrides::default()).unwrap();
+
+        let log = config.settings().log.as_ref().unwrap();
+        assert_eq!(log.file, PathBuf::from("agent.log"));
+        assert_eq!(log.max_size.bytes(), 10_485_760);
+        assert_eq!(log.max_files.get(), 5);
+        assert_eq!(log.level, None);
+    }
+
+    #[test]
+    fn the_log_size_is_read_as_text_or_as_a_byte_count() {
+        for (max_size, bytes) in [(r#""500KB""#, 512_000), ("2048", 2048)] {
+            let fixture = Fixture::new();
+            fixture.write_settings(&format!(
+                r#"{{ "log": {{ "file": "agent.log", "max_size": {max_size}, "max_files": 3 }} }}"#
+            ));
+
+            let config = fixture.load(Overrides::default()).unwrap();
+
+            let log = config.settings().log.as_ref().unwrap();
+            assert_eq!(log.max_size.bytes(), bytes, "{max_size}");
+            assert_eq!(log.max_files.get(), 3);
+        }
+    }
+
+    #[test]
+    fn invalid_log_limits_in_the_file_are_rejected() {
+        for log in [
+            r#"{ "file": "agent.log", "max_files": 0 }"#,
+            r#"{ "file": "agent.log", "max_size": "10XB" }"#,
+            r#"{ "file": "agent.log", "max_size": 0 }"#,
+            r#"{ "max_size": "10MB" }"#,
+            r#"{ "file": "agent.log", "level": "htp_agent=loud" }"#,
+            r#"{ "file": "agent.log", "level": "trce" }"#,
+        ] {
+            let fixture = Fixture::new();
+            fixture.write_settings(&format!(r#"{{ "log": {log} }}"#));
+
+            let error = fixture.load(Overrides::default()).unwrap_err();
+
+            assert!(
+                matches!(error, ConfigError::Json { .. }),
+                "{log}: expected a JSON error, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_log_size_of_the_wrong_type_says_what_is_expected() {
+        let fixture = Fixture::new();
+        fixture.write_settings(r#"{ "log": { "file": "agent.log", "max_size": 1.5 } }"#);
+
+        let error = fixture.load(Overrides::default()).unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains(r#"expected a size such as "10MB" or a byte count"#),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn log_overrides_win_over_the_file() {
+        let fixture = Fixture::new();
+        fixture.write_settings(
+            r#"{ "log": { "file": "from-file.log", "max_size": "1MB", "max_files": 2, "level": "debug" } }"#,
+        );
+
+        let config = fixture
+            .load(Overrides {
+                log_file: Some(PathBuf::from("from-cli.log")),
+                log_max_size: Some("20MB".parse().unwrap()),
+                log_max_files: Some(NonZeroUsize::new(9).unwrap()),
+                log_file_level: Some(LogLevel::Verbosity(Verbosity::Trace)),
+                ..Overrides::default()
+            })
+            .unwrap();
+
+        let log = config.settings().log.as_ref().unwrap();
+        assert_eq!(log.file, PathBuf::from("from-cli.log"));
+        assert_eq!(log.max_size.bytes(), 20_971_520);
+        assert_eq!(log.max_files.get(), 9);
+        assert_eq!(log.level, Some(LogLevel::Verbosity(Verbosity::Trace)));
+    }
+
+    #[test]
+    fn a_log_file_flag_alone_turns_on_file_logging_with_the_defaults() {
+        let fixture = Fixture::new();
+
+        let config = fixture
+            .load(Overrides {
+                log_file: Some(PathBuf::from("agent.log")),
+                ..Overrides::default()
+            })
+            .unwrap();
+
+        let log = config.settings().log.as_ref().unwrap();
+        assert_eq!(log.file, PathBuf::from("agent.log"));
+        assert_eq!(log.max_size.bytes(), 10_485_760);
+        assert_eq!(log.max_files.get(), 5);
+    }
+
+    #[test]
+    fn log_file_flags_without_a_log_file_are_rejected() {
+        for overrides in [
+            Overrides {
+                log_max_files: Some(NonZeroUsize::new(3).unwrap()),
+                ..Overrides::default()
+            },
+            Overrides {
+                log_max_size: Some("1MB".parse().unwrap()),
+                ..Overrides::default()
+            },
+            Overrides {
+                log_file_level: Some(LogLevel::Verbosity(Verbosity::Trace)),
+                ..Overrides::default()
+            },
+        ] {
+            let fixture = Fixture::new();
+
+            let error = fixture.load(overrides).unwrap_err();
+
+            let message = error.to_string();
+            assert!(
+                matches!(error, ConfigError::LogOptionsWithoutFile { .. }),
+                "{error:?}"
+            );
+            assert!(message.contains("log.file"), "{message}");
+            assert!(message.contains("pass --log-file"), "{message}");
+            assert!(message.contains(DEFAULT_SETTINGS_FILE), "{message}");
+        }
+    }
+
+    #[test]
+    fn log_levels_take_a_verbosity_word_or_a_filter() {
+        for (text, level) in [
+            ("normal", LogLevel::Verbosity(Verbosity::Normal)),
+            ("debug", LogLevel::Verbosity(Verbosity::Debug)),
+            ("trace", LogLevel::Verbosity(Verbosity::Trace)),
+            ("TRACE", LogLevel::Verbosity(Verbosity::Trace)),
+            (" Debug ", LogLevel::Verbosity(Verbosity::Debug)),
+            (
+                "htp_agent=trace,hyper=debug",
+                LogLevel::Filter("htp_agent=trace,hyper=debug".to_string()),
+            ),
+            (
+                "warn,htp_agent=trace",
+                LogLevel::Filter("warn,htp_agent=trace".to_string()),
+            ),
+        ] {
+            assert_eq!(text.parse::<LogLevel>().unwrap(), level, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_word_that_is_no_level_is_rejected_instead_of_taken_for_a_target() {
+        for (text, word) in [
+            ("trce", "trce"),
+            ("debg", "debg"),
+            ("hyper", "hyper"),
+            ("inf,htp_agent=debug", "inf"),
+            ("htp_agent=debug,wrn", "wrn"),
+        ] {
+            let error = text.parse::<LogLevel>().unwrap_err();
+
+            assert!(
+                matches!(&error, LogLevelError::UnknownLevel(unknown) if unknown == word),
+                "{text}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_log_level_is_rejected() {
+        for text in ["", "  "] {
+            let error = text.parse::<LogLevel>().unwrap_err();
+
+            assert!(matches!(error, LogLevelError::Empty), "{text:?}: {error:?}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_log_filter_is_rejected_with_its_cause() {
+        let error = "htp_agent=loud".parse::<LogLevel>().unwrap_err();
+
+        assert!(
+            matches!(error, LogLevelError::InvalidFilter { .. }),
+            "{error:?}"
+        );
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn the_log_level_is_read_from_the_log_section() {
+        let fixture = Fixture::new();
+        fixture.write_settings(r#"{ "log": { "file": "agent.log", "level": "trace" } }"#);
+
+        let config = fixture.load(Overrides::default()).unwrap();
+
+        let log = config.settings().log.as_ref().unwrap();
+        assert_eq!(log.level, Some(LogLevel::Verbosity(Verbosity::Trace)));
     }
 }

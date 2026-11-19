@@ -10,10 +10,10 @@ use crate::model::{Chunk, Crack, ProgressReport};
 use crate::process::{self, ProcessSpec};
 use crate::sysinfo::CpuSampler;
 
-use super::HashcatInvocation;
 use super::auto_pipe::{Probe, mean_util, should_repipe};
 use super::progress::ProgressMode;
 use super::status::{self, HashcatStatus};
+use super::{HashcatInvocation, StreamUnit};
 
 const CHANNEL_CAPACITY: usize = 256;
 const MAX_CRACKS_PER_UPDATE: usize = 1000;
@@ -99,7 +99,8 @@ pub(super) async fn run<S: ProgressSink>(
     );
     keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    let mut state = ChunkRun::new(chunk, invocation.producer.is_some(), progress_mode, probe);
+    let stream = invocation.producer.as_ref().map(|stage| stage.unit);
+    let mut state = ChunkRun::new(chunk, stream, progress_mode, probe);
 
     loop {
         tokio::select! {
@@ -214,7 +215,8 @@ struct Progress {
 /// Mutable state carried across the run loop's iterations.
 struct ChunkRun {
     chunk: Chunk,
-    piped: bool,
+    /// `None` on a direct run, where hashcat reads the attack itself.
+    stream: Option<StreamUnit>,
     pending: Vec<String>,
     last_progress: Option<Progress>,
     first_status: bool,
@@ -227,10 +229,15 @@ struct ChunkRun {
 }
 
 impl ChunkRun {
-    fn new(chunk: Chunk, piped: bool, progress: ProgressMode, probe: Option<Probe>) -> Self {
+    fn new(
+        chunk: Chunk,
+        stream: Option<StreamUnit>,
+        progress: ProgressMode,
+        probe: Option<Probe>,
+    ) -> Self {
         Self {
             chunk,
-            piped,
+            stream,
             pending: Vec::new(),
             last_progress: None,
             first_status: false,
@@ -308,18 +315,13 @@ impl ChunkRun {
     }
 
     fn progress_from(&mut self, status: &HashcatStatus) -> Progress {
-        let relative_progress = self.progress.basis_points(status, &self.chunk, self.piped);
+        let piped = self.stream.is_some();
+        let relative_progress = self.progress.basis_points(status, &self.chunk, piped);
 
         let temps = status.temps();
         let utils = status.utils();
 
-        // When hashcat cannot report a restore point, the chunk's own start offset
-        // stands in, or the server would read it as no progress from the beginning.
-        let keyspace_progress = if self.restore_point_unavailable(status) {
-            self.chunk.skip
-        } else {
-            status.curku()
-        };
+        let keyspace_progress = self.keyspace_progress(status);
 
         // hashcat reports GPU temperature and utilisation but not host CPU load,
         // so we sample it here, once per status update.
@@ -336,11 +338,26 @@ impl ChunkRun {
         }
     }
 
-    /// hashcat cannot produce a restore point (`curku`) when it reads candidates
-    /// from a pipe rather than seeking a wordlist, so it reports `0`. A piped run
-    /// reporting `0` is that case, not genuinely zero progress.
-    fn restore_point_unavailable(&self, status: &HashcatStatus) -> bool {
-        self.piped && status.curku() == 0
+    /// The chunk checkpoint to report, in task keyspace units.
+    ///
+    /// `curku` is hashcat's restore point. A direct run was given the chunk's
+    /// `--skip`, so that point is already a position in the task's keyspace. A
+    /// piped run was not: the producer was given the window instead, so hashcat
+    /// counts the stream it is fed from zero and the chunk's own offset has to be
+    /// added back. hashcat before 8.0 had no restore point for a pipe at all and
+    /// reported `0`, which leaves the chunk start, as it did before.
+    ///
+    /// A stream of candidates passes the chunk's length long before the chunk is
+    /// done, so its restore point cannot be placed in the chunk. Staying at the
+    /// chunk start makes the server redo an interrupted chunk rather than skip
+    /// the part hashcat never reached.
+    fn keyspace_progress(&self, status: &HashcatStatus) -> u64 {
+        match self.stream {
+            None => status.curku(),
+            // The clamp guards against a producer that emits more than its window.
+            Some(StreamUnit::Keyspace) => self.chunk.skip + status.curku().min(self.chunk.length),
+            Some(StreamUnit::Candidate) => self.chunk.skip,
+        }
     }
 
     /// Send the current progress, draining pending cracks in batches of at most
@@ -417,7 +434,7 @@ impl ChunkRun {
         ProgressReport {
             chunk_id: self.chunk.id,
             keyspace_progress: self.chunk.skip,
-            state: 2,
+            state: ProgressReport::STATE_RUNNING,
             ..Default::default()
         }
     }
@@ -519,7 +536,7 @@ mod tests {
                 skip: 0,
                 length: 10_000,
             },
-            false,
+            None,
             ProgressMode::Absolute,
             None,
         );
@@ -538,5 +555,68 @@ mod tests {
         // GPU telemetry from the status line is unaffected.
         assert_eq!(progress.gpu_temp.as_deref(), Some(&[60][..]));
         assert_eq!(progress.gpu_util.as_deref(), Some(&[95][..]));
+    }
+
+    const SKIP: u64 = 5_000_000;
+    const LENGTH: u64 = 100_000;
+
+    fn run(stream: Option<StreamUnit>) -> ChunkRun {
+        ChunkRun::new(
+            Chunk {
+                id: 50,
+                skip: SKIP,
+                length: LENGTH,
+            },
+            stream,
+            ProgressMode::Relative,
+            None,
+        )
+    }
+
+    fn status(curku: u64) -> HashcatStatus {
+        HashcatStatus::parse(&format!("STATUS\t3\tCURKU\t{curku}\tPROGRESS\t0\t0"))
+    }
+
+    #[test]
+    fn a_direct_run_reports_curku_as_it_stands() {
+        let run = run(None);
+
+        // hashcat was given the chunk's --skip, so its restore point is already a task position
+        assert_eq!(run.keyspace_progress(&status(SKIP)), SKIP);
+        assert_eq!(run.keyspace_progress(&status(SKIP + 2500)), SKIP + 2500);
+    }
+
+    #[test]
+    fn a_piped_run_on_hashcat_without_a_restore_point_reports_the_chunk_start() {
+        let run = run(Some(StreamUnit::Keyspace));
+
+        // hashcat before 8.0 reported CURKU 0 for the whole of a piped run
+        assert_eq!(run.keyspace_progress(&status(0)), SKIP);
+    }
+
+    #[test]
+    fn a_keyspace_stream_adds_the_chunk_offset_to_curku() {
+        let run = run(Some(StreamUnit::Keyspace));
+
+        // the producer was given the window, so CURKU counts the stream from its start
+        assert_eq!(run.keyspace_progress(&status(1200)), SKIP + 1200);
+        assert_eq!(run.keyspace_progress(&status(LENGTH)), SKIP + LENGTH);
+    }
+
+    #[test]
+    fn a_keyspace_stream_past_the_end_of_the_chunk_is_clamped() {
+        let run = run(Some(StreamUnit::Keyspace));
+
+        assert_eq!(run.keyspace_progress(&status(LENGTH * 7)), SKIP + LENGTH);
+    }
+
+    #[test]
+    fn a_candidate_stream_reports_the_chunk_start_whatever_curku_says() {
+        let run = run(Some(StreamUnit::Candidate));
+
+        // with three rules CURKU reaches the chunk's length a third of the way through it
+        for curku in [0, 1200, LENGTH, LENGTH * 3] {
+            assert_eq!(run.keyspace_progress(&status(curku)), SKIP, "{curku}");
+        }
     }
 }
