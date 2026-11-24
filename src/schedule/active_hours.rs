@@ -1,7 +1,7 @@
 use std::mem;
 use std::time::Duration;
 
-use jiff::{SignedDuration, Zoned};
+use jiff::{SignedDuration, ZonedDateTime};
 use tokio::time::{Instant, sleep};
 
 use super::{ScheduleFile, WeekSecond};
@@ -30,7 +30,7 @@ pub struct ActiveHours {
 
 impl ActiveHours {
     pub fn new(file: ScheduleFile) -> Self {
-        Self::with_clock(file, || WeekSecond::from(Zoned::now().datetime()))
+        Self::with_clock(file, || WeekSecond::from(ZonedDateTime::now().datetime()))
     }
 
     pub fn with_clock(
