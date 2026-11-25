@@ -58,3 +58,9 @@ strip = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Minimal containers often ship without tzdata, so a time zone such as
+# TZ=Europe/Zurich would not resolve. jiff only falls back to this bundled copy
+# when the system has no time zone database at all.
+[target.'cfg(target_os = "linux")'.dependencies]
+jiff = { version = "1.0.3", features = ["tzdb-bundle-always"] }
