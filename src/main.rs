@@ -13,8 +13,11 @@ use htp_agent::download::HttpDownloader;
 use htp_agent::http::HttpSettings;
 use htp_agent::log::RawPrinter;
 use htp_agent::provisioner::DiskProvisioner;
+use htp_agent::schedule::{ActiveHours, ScheduleFile};
 use htp_agent::transport::HttpTransport;
 use htp_agent::update::PendingRestart;
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -90,6 +93,20 @@ async fn run(cli: &Cli, config: Config, printer: &RawPrinter) -> Result<Exit<Pen
         return Ok(Exit::Shutdown);
     }
 
+    log_time_zone();
+
+    let active_hours = {
+        let file = ScheduleFile::load(config.schedule_file_path());
+
+        if file.schedule().is_some() {
+            tracing::info!(path = %file.path().display(), "active hours loaded");
+        } else {
+            tracing::debug!(path = %file.path().display(), "no active hours");
+        }
+
+        ActiveHours::new(file)
+    };
+
     // No timeout here: downloads may stream for many minutes.
     let downloader = {
         let client = http
@@ -123,9 +140,31 @@ async fn run(cli: &Cli, config: Config, printer: &RawPrinter) -> Result<Exit<Pen
         config_path: &config_path,
     });
 
-    let mut agent = Agent::bootstrap(transport, config, provisioner).await?;
+    let mut agent = Agent::bootstrap(transport, config, provisioner)
+        .await?
+        .with_active_hours(active_hours);
 
     Ok(agent.run().await?)
+}
+
+/// Without a system time zone, jiff falls back to one that behaves like UTC, and
+/// only says so through the `log` crate, which goes nowhere.
+fn log_time_zone() {
+    match TimeZone::try_system() {
+        Ok(zone) => {
+            let time_zone = zone.iana_name().map_or_else(
+                || format!("UTC{}", zone.to_offset(Timestamp::now())),
+                str::to_string,
+            );
+
+            tracing::info!(time_zone, "system time zone");
+        }
+        // jiff's error doesn't name the value it failed to resolve.
+        Err(error) => match std::env::var("TZ") {
+            Ok(tz) => tracing::info!(tz, %error, "system time zone unknown, using UTC"),
+            Err(_) => tracing::info!(%error, "system time zone unknown, using UTC"),
+        },
+    }
 }
 
 struct ProvisionerSettings {
