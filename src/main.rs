@@ -93,28 +93,15 @@ async fn run(cli: &Cli, config: Config, printer: &RawPrinter) -> Result<Exit<Pen
         return Ok(Exit::Shutdown);
     }
 
+    log_time_zone();
+
     let active_hours = {
         let file = ScheduleFile::load(config.schedule_file_path());
 
-        // Without a system time zone, jiff falls back to one that behaves like
-        // UTC, and only says so through the `log` crate, which goes nowhere.
-        let system_zone = TimeZone::try_system();
-        let time_zone = match &system_zone {
-            Ok(zone) => zone.iana_name().map_or_else(
-                || format!("UTC{}", zone.to_offset(Timestamp::now())),
-                str::to_string,
-            ),
-            Err(_) => "UTC".to_string(),
-        };
-
         if file.schedule().is_some() {
-            tracing::info!(path = %file.path().display(), time_zone, "active hours loaded");
-
-            if let Err(error) = &system_zone {
-                tracing::warn!(%error, "system time zone unknown, active hours run on UTC");
-            }
+            tracing::info!(path = %file.path().display(), "active hours loaded");
         } else {
-            tracing::debug!(path = %file.path().display(), time_zone, "no active hours");
+            tracing::debug!(path = %file.path().display(), "no active hours");
         }
 
         ActiveHours::new(file)
@@ -158,6 +145,26 @@ async fn run(cli: &Cli, config: Config, printer: &RawPrinter) -> Result<Exit<Pen
         .with_active_hours(active_hours);
 
     Ok(agent.run().await?)
+}
+
+/// Without a system time zone, jiff falls back to one that behaves like UTC, and
+/// only says so through the `log` crate, which goes nowhere.
+fn log_time_zone() {
+    match TimeZone::try_system() {
+        Ok(zone) => {
+            let time_zone = zone.iana_name().map_or_else(
+                || format!("UTC{}", zone.to_offset(Timestamp::now())),
+                str::to_string,
+            );
+
+            tracing::info!(time_zone, "system time zone");
+        }
+        // jiff's error doesn't name the value it failed to resolve.
+        Err(error) => match std::env::var("TZ") {
+            Ok(tz) => tracing::info!(tz, %error, "system time zone unknown, using UTC"),
+            Err(_) => tracing::info!(%error, "system time zone unknown, using UTC"),
+        },
+    }
 }
 
 struct ProvisionerSettings {
