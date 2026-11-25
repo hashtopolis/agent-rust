@@ -261,12 +261,12 @@ Each entry is `[DAYS ]FROM-TO`:
 `{"active": []}` never works and `{"inactive": []}` always does.
 
 The schedule only stops the agent from asking for new work: a chunk that is
-running when the window closes finishes normally. While paused, the agent also
-skips update checks, so it never updates or restarts during blocked hours, but
-it still deletes files the server no longer needs. It makes no other calls, so
-the server shows it as offline. Paused agents keep their task assignment, so
-they still hold small tasks and count towards a task's maximum number of
-agents.
+running when the window closes finishes normally. While paused, the agent skips
+update checks, so apart from the check at startup it never updates or restarts
+during blocked hours. It still deletes files the server no longer needs. It
+makes no other calls, so the server shows it as offline. Paused agents keep
+their task assignment, so they still hold small tasks and count towards a
+task's maximum number of agents.
 
 The file can be created, edited or deleted while the agent runs. A paused agent
 notices a change within a second and resumes as soon as the new schedule
