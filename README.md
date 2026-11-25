@@ -271,9 +271,11 @@ agents.
 The file can be created, edited or deleted while the agent runs. A paused agent
 notices a change within a second and resumes as soon as the new schedule
 allows; a working agent picks it up before it next asks for work, so a running
-chunk still finishes first. Deleting the file lifts the schedule. An edit that
-can't be read or parsed keeps the previous schedule and logs a warning. An
-invalid file at startup stops the agent with an error.
+chunk still finishes first. A file that can't be read or parsed, at startup or
+later, is ignored with a warning, and the agent works at any time until it is
+fixed. Deleting the file lifts the schedule too. A save can leave the file
+empty or missing for a moment, so a broken or missing file only counts once it
+is still unchanged at the next check, which comes within a minute while paused.
 
 ### Server connection
 

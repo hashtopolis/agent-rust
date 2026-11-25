@@ -146,7 +146,7 @@ mod tests {
 
             let now = Arc::new(AtomicU32::new(0));
             let clock = Arc::clone(&now);
-            let file = ScheduleFile::load(&path).unwrap();
+            let file = ScheduleFile::load(&path);
             let hours = ActiveHours::with_clock(file, move || {
                 WeekSecond::new(clock.load(Ordering::SeqCst)).unwrap()
             });
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn check_is_active_without_a_file() {
         let dir = TempDir::new().unwrap();
-        let file = ScheduleFile::load(dir.path().join("schedule.json")).unwrap();
+        let file = ScheduleFile::load(dir.path().join("schedule.json"));
         let mut hours = ActiveHours::with_clock(file, || WeekSecond::new(0).unwrap());
 
         let activity = hours.check();

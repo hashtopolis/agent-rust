@@ -94,7 +94,7 @@ async fn run(cli: &Cli, config: Config, printer: &RawPrinter) -> Result<Exit<Pen
     }
 
     let active_hours = {
-        let file = ScheduleFile::load(config.schedule_file_path())?;
+        let file = ScheduleFile::load(config.schedule_file_path());
 
         // Without a system time zone, jiff falls back to one that behaves like
         // UTC, and only says so through the `log` crate, which goes nowhere.
@@ -114,7 +114,7 @@ async fn run(cli: &Cli, config: Config, printer: &RawPrinter) -> Result<Exit<Pen
                 tracing::warn!(%error, "system time zone unknown, active hours run on UTC");
             }
         } else {
-            tracing::debug!(path = %file.path().display(), time_zone, "no active hours file");
+            tracing::debug!(path = %file.path().display(), time_zone, "no active hours");
         }
 
         ActiveHours::new(file)

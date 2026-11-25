@@ -61,7 +61,7 @@ impl AgentRig {
     /// `clock` in order and then keeps repeating the last one.
     fn active_hours(mut self, schedule: &str, clock: impl IntoIterator<Item = WeekSecond>) -> Self {
         let path = self.env.write_file("schedule.json", schedule);
-        let file = ScheduleFile::load(path).unwrap();
+        let file = ScheduleFile::load(path);
         let times = Mutex::new(clock.into_iter().collect::<VecDeque<_>>());
 
         let hours = ActiveHours::with_clock(file, move || {
